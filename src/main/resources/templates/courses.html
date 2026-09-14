@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>课程管理 - AI Review Assistant</title>
+    <link rel="stylesheet" href="/css/common.css">
+    <style>
+        .course-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px; }
+        .course-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 24px;
+            transition: all var(--t-normal) var(--ease);
+        }
+        .course-card:hover { box-shadow: var(--shadow-md); transform: translateY(-2px); }
+        .course-card h5 { font-size: 16px; font-weight: 600; color: var(--text); margin-bottom: 8px; }
+        .course-card p {
+            font-size: 14px;
+            color: var(--text-muted);
+            margin: 0 0 16px;
+            line-height: 1.6;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+        .course-meta { display: flex; justify-content: space-between; align-items: center; }
+        .course-actions { display: flex; gap: 8px; }
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,.5);
+            backdrop-filter: blur(8px);
+            z-index: 100;
+            align-items: center;
+            justify-content: center;
+        }
+        .modal-overlay.show { display: flex; }
+        .modal-box {
+            background: var(--surface);
+            border-radius: var(--radius-xl);
+            padding: 32px;
+            width: 100%;
+            max-width: 480px;
+            box-shadow: var(--shadow-xl);
+            animation: slideUp .3s var(--ease-spring);
+        }
+        .modal-box h3 { font-size: 20px; font-weight: 600; margin-bottom: 24px; }
+        @keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+</head>
+<body>
+<nav class="navbar">
+    <div class="navbar-inner">
+        <a class="navbar-brand" href="/"><span class="brand-icon">📚</span>AI Review Assistant</a>
+        <div class="nav-links">
+            <a href="/">💬 对话</a>
+            <a class="active" href="/courses.html">📖 课程</a>
+            <a href="/knowledge.html">📚 知识库</a>
+            <a href="/quiz.html">📝 测验</a>
+            <a href="/plan.html">📅 计划</a>
+            <a href="/stats.html">📊 统计</a>
+            <div class="nav-user">
+                <span class="nav-avatar" id="userAvatar">G</span>
+                <span class="nav-nickname" id="userNickname">访客</span>
+            </div>
+            <button class="nav-logout" onclick="logout()" id="logoutBtn" style="display:none">退出</button>
+        </div>
+    </div>
+</nav>
+<div class="page-body">
+    <div class="card-header">
+        <div class="card-title">
+            <span class="title-icon">📖</span>
+            我的课程
+        </div>
+        <button class="btn btn-primary btn-sm" onclick="showModal()">新建课程</button>
+    </div>
+    <div id="courseList" class="course-grid"></div>
+    <div class="empty-state" id="emptyState" style="display:none">
+        <div class="empty-icon">📚</div>
+        <p>暂无课程，创建第一个课程开始学习</p>
+    </div>
+</div>
+<div class="modal-overlay" id="modal">
+    <div class="modal-box">
+        <h3 id="modalTitle">新建课程</h3>
+        <input type="hidden" id="editCourseId">
+        <div class="form-group">
+            <label class="form-label">课程名称</label>
+            <input type="text" class="form-control" id="courseName" placeholder="例如：数据库系统" required>
+        </div>
+        <div class="form-group">
+            <label class="form-label">课程描述</label>
+            <textarea class="form-control" id="courseDesc" rows="3" placeholder="简要描述（可选）"></textarea>
+        </div>
+        <div class="modal-actions">
+            <button class="btn btn-secondary btn-sm" onclick="hideModal()">取消</button>
+            <button class="btn btn-primary btn-sm" onclick="saveCourse()">保存</button>
+        </div>
+    </div>
+</div>
+<script>
+const token=localStorage.getItem('token');
+let courses=[];
+document.addEventListener('DOMContentLoaded',()=>{checkAuth();loadCourses()});
+function checkAuth(){
+    if(!token){window.location.href='/login.html';return}
+    const n=localStorage.getItem('nickname')||localStorage.getItem('username')||'?';
+    document.getElementById('userNickname').textContent=n;
+    document.getElementById('userAvatar').textContent=n.charAt(0).toUpperCase();
+    document.getElementById('logoutBtn').style.display='inline';
+}
+function logout(){localStorage.clear();window.location.href='/login.html'}
+function authHeaders(){return{'Content-Type':'application/json','Authorization':'Bearer '+token}}
+async function loadCourses(){
+    try{
+        const r=await fetch('/courses',{headers:authHeaders()});
+        const d=await r.json();
+        courses=d.code===0?d.data:[];
+        renderCourses();
+    } catch(e) { console.error(e); }
+}
+function renderCourses(){
+    const l=document.getElementById('courseList');
+    const e=document.getElementById('emptyState');
+    if(!courses.length){l.innerHTML='';e.style.display='block';return}
+    e.style.display='none';
+    l.innerHTML=courses.map(c=>'<div class="course-card"><h5>'+esc(c.name)+'</h5><p>'+(esc(c.description)||'暂无描述')+'</p><div class="course-meta"><span class="badge badge-muted">'+fmtDate(c.createdAt)+'</span><div class="course-actions"><button class="btn btn-ghost btn-sm" onclick="goToChat('+c.id+',\''+esc(c.name)+'\')">💬 对话</button><button class="btn btn-ghost btn-sm" onclick="editCourse('+c.id+')">✏️ 编辑</button><button class="btn btn-danger btn-sm" onclick="deleteCourse('+c.id+',\''+esc(c.name)+'\')">🗑️ 删除</button></div></div></div>').join('');
+}
+function goToChat(id,name){
+    localStorage.setItem('currentCourseId',id);
+    localStorage.setItem('currentCourseName',name);
+    window.location.href='/';
+}
+function showModal(){
+    document.getElementById('modalTitle').textContent='新建课程';
+    document.getElementById('editCourseId').value='';
+    document.getElementById('courseName').value='';
+    document.getElementById('courseDesc').value='';
+    document.getElementById('modal').classList.add('show');
+}
+function hideModal(){document.getElementById('modal').classList.remove('show')}
+function editCourse(id){
+    const c=courses.find(x=>x.id===id);
+    if(!c)return;
+    document.getElementById('modalTitle').textContent='编辑课程';
+    document.getElementById('editCourseId').value=id;
+    document.getElementById('courseName').value=c.name;
+    document.getElementById('courseDesc').value=c.description||'';
+    document.getElementById('modal').classList.add('show');
+}
+async function saveCourse(){
+    const id=document.getElementById('editCourseId').value;
+    const name=document.getElementById('courseName').value.trim();
+    const desc=document.getElementById('courseDesc').value.trim();
+    if(!name){alert('请输入课程名称');return}
+    const url=id?'/courses/'+id:'/courses';
+    const method=id?'PUT':'POST';
+    try{
+        const r=await fetch(url,{method,headers:authHeaders(),body:JSON.stringify({name,description:desc})});
+        const d=await r.json();
+        if(d.code===0){hideModal();loadCourses()} else {alert(d.message||'保存失败')}
+    } catch(e) { alert('网络错误'); }
+}
+async function deleteCourse(id,name){
+    if(!confirm('删除课程 "'+name+'"？此操作不可撤销'))return;
+    try{
+        const r=await fetch('/courses/'+id,{method:'DELETE',headers:authHeaders()});
+        const d=await r.json();
+        if(d.code===0)loadCourses(); else alert(d.message||'删除失败');
+    } catch(e) { alert('网络错误'); }
+}
+function esc(s){if(!s)return'';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+function fmtDate(s){if(!s)return'';const d=new Date(s);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}
+</script>
+</body>
+</html>

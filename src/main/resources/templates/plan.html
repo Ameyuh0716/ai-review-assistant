@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>学习计划 - AI Review Assistant</title>
+    <link rel="stylesheet" href="/css/common.css">
+    <style>
+        .plan-list { display: flex; flex-direction: column; gap: 12px; }
+        .plan-item {
+            display: flex; align-items: center; justify-content: space-between;
+            background: var(--surface); border: 1px solid var(--border);
+            border-radius: var(--radius-lg); padding: 18px 20px;
+            transition: all var(--t-fast) var(--ease); cursor: pointer;
+        }
+        .plan-item:hover { border-color: var(--primary); box-shadow: var(--shadow-md); transform: translateY(-1px); }
+        .plan-info { flex: 1; min-width: 0; }
+        .plan-title { font-weight: 600; color: var(--text); font-size: 15px; margin-bottom: 4px; }
+        .plan-meta { font-size: 13px; color: var(--text-muted); }
+        .plan-actions { display: flex; gap: 8px; align-items: center; }
+        .empty-state { text-align: center; padding: 60px 20px; color: var(--text-muted); }
+        .empty-state .big { font-size: 48px; margin-bottom: 12px; }
+        .empty-state h4 { color: var(--text); margin-bottom: 8px; }
+        .detail-card { display: none; }
+        .detail-card.show { display: block; }
+        .detail-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+        .plan-output {
+            background: var(--bg-subtle); border: 1px solid var(--border);
+            border-radius: var(--radius-lg); padding: 24px;
+            line-height: 1.9; font-size: 15px;
+        }
+        .plan-output h1, .plan-output h2, .plan-output h3 { font-weight: 600; color: var(--primary); margin: 18px 0 10px; }
+        .plan-output ul, .plan-output ol { padding-left: 24px; }
+        .plan-output li { margin: 5px 0; }
+        .plan-output strong { color: var(--text); }
+        .plan-output code { background: var(--border-light); padding: 3px 8px; border-radius: 4px; font-size: 14px; }
+        .hint-bar {
+            display: flex; align-items: center; justify-content: space-between;
+            background: var(--primary-50); border: 1px solid var(--primary-200);
+            border-radius: var(--radius-md); padding: 14px 18px; margin-bottom: 16px;
+        }
+        .hint-bar span { font-size: 14px; color: var(--primary); }
+    </style>
+</head>
+<body>
+<nav class="navbar">
+    <div class="navbar-inner">
+        <a class="navbar-brand" href="/"><span class="brand-icon">📚</span>AI Review Assistant</a>
+        <div class="nav-links">
+            <a href="/">💬 对话</a>
+            <a href="/courses.html">📖 课程</a>
+            <a href="/knowledge.html">📚 知识库</a>
+            <a href="/quiz.html">📝 测验</a>
+            <a class="active" href="/plan.html">📅 计划</a>
+            <a href="/stats.html">📊 统计</a>
+            <div class="nav-user">
+                <span class="nav-avatar" id="userAvatar">G</span>
+                <span class="nav-nickname" id="userNickname">访客</span>
+            </div>
+            <button class="nav-logout" onclick="logout()" id="logoutBtn" style="display:none">退出</button>
+        </div>
+    </div>
+</nav>
+<div class="page-body">
+    <div class="card">
+        <div class="card-header">
+            <div class="card-title"><span class="title-icon">📅</span>学习计划</div>
+        </div>
+        <div class="hint-bar">
+            <span>💡 在「对话」中让 AI 制定复习计划，生成后会自动保存到这里。</span>
+            <a href="/" class="btn btn-primary btn-sm">去对话</a>
+        </div>
+        <div id="listArea"></div>
+        <div id="detailArea" class="detail-card">
+            <div class="detail-header">
+                <div>
+                    <div class="plan-title" id="detailTitle"></div>
+                    <div class="plan-meta" id="detailMeta"></div>
+                </div>
+                <div style="display:flex;gap:8px">
+                    <button class="btn btn-secondary btn-sm" onclick="showList()">返回列表</button>
+                    <button class="btn btn-danger btn-sm" id="deleteBtn">删除</button>
+                </div>
+            </div>
+            <div class="plan-output" id="detailContent"></div>
+        </div>
+    </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
+<script>
+const token=localStorage.getItem('token');
+document.addEventListener('DOMContentLoaded',()=>{
+    if(!token){window.location.href='/login.html';return}
+    const n=localStorage.getItem('nickname')||localStorage.getItem('username')||'';
+    document.getElementById('userNickname').textContent=n;
+    document.getElementById('userAvatar').textContent=n.charAt(0).toUpperCase();
+    document.getElementById('logoutBtn').style.display='inline';
+    loadPlans();
+});
+function logout(){localStorage.clear();window.location.href='/login.html'}
+function authHeaders(ct){const h={};if(ct)h['Content-Type']=ct;if(token)h['Authorization']='Bearer '+token;return h}
+async function loadPlans(){
+    const el=document.getElementById('listArea');
+    el.innerHTML='<div class="loading-center"><div class="spinner"></div><p>加载中...</p></div>';
+    try{
+        const r=await fetch('/api/plans',{headers:authHeaders('application/json')});
+        const d=await r.json();
+        const list=(d&&d.data)?d.data:[];
+        renderPlanList(list);
+    }catch(e){
+        el.innerHTML='<div class="card" style="color:var(--danger)">加载失败: '+esc(e.message)+'</div>';
+    }
+}
+function renderPlanList(list){
+    const el=document.getElementById('listArea');
+    if(!list.length){
+        el.innerHTML='<div class="empty-state"><div class="big">📅</div><h4>暂无学习计划</h4><p>去对话中让 AI 为你制定复习计划吧</p><a href="/" class="btn btn-primary">去对话</a></div>';
+        return;
+    }
+    el.innerHTML='<div class="plan-list">'+list.map(p=>{
+        const date=fmtTime(p.createdAt);
+        return '<div class="plan-item" data-id="'+p.id+'">'
+            +'<div class="plan-info"><div class="plan-title">'+esc(p.courseName)+' <span style="color:var(--text-muted);font-weight:400">— '+esc(p.availableDays)+'</span></div>'
+            +'<div class="plan-meta">'+date+'</div></div>'
+            +'<div class="plan-actions"><button class="btn btn-primary btn-sm" onclick="event.stopPropagation();viewPlan('+p.id+')">查看</button>'
+            +'<button class="btn btn-danger btn-sm" onclick="event.stopPropagation();deletePlan('+p.id+')">删除</button></div>'
+            +'</div>';
+    }).join('')+'</div>';
+    el.querySelectorAll('.plan-item').forEach(item=>{
+        item.addEventListener('click',()=>viewPlan(parseInt(item.dataset.id)));
+    });
+}
+async function viewPlan(id){
+    try{
+        const r=await fetch('/api/plans/'+id,{headers:authHeaders('application/json')});
+        const d=await r.json();
+        if(d.code!==0){alert(d.message||'加载失败');return}
+        const p=d.data;
+        document.getElementById('detailTitle').textContent=p.courseName;
+        document.getElementById('detailMeta').textContent=p.availableDays+' · '+fmtTime(p.createdAt);
+        document.getElementById('detailContent').innerHTML=renderMd(p.content);
+        const btn=document.getElementById('deleteBtn');
+        btn.onclick=()=>deletePlan(id);
+        document.getElementById('listArea').style.display='none';
+        document.getElementById('detailArea').classList.add('show');
+    }catch(e){alert('加载失败: '+e.message)}
+}
+function showList(){
+    document.getElementById('detailArea').classList.remove('show');
+    document.getElementById('listArea').style.display='block';
+}
+async function deletePlan(id){
+    if(!confirm('确定删除该学习计划？'))return;
+    try{
+        const r=await fetch('/api/plans/'+id,{method:'DELETE',headers:authHeaders('application/json')});
+        const d=await r.json();
+        if(d.code!==0){alert(d.message||'删除失败');return}
+        showList();
+        loadPlans();
+    }catch(e){alert('删除失败: '+e.message)}
+}
+function renderMd(text){
+    if(!text)return'';
+    try{
+        if(window.marked){
+            const raw=marked.parse(text,{gfm:true,breaks:false});
+            if(window.DOMPurify)return DOMPurify.sanitize(raw);
+            return raw;
+        }
+    }catch(e){}
+    return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/```(\w*)\n([\s\S]*?)```/g,'<pre><code>$2</code></pre>').replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/^### (.+)$/gm,'<h3>$1</h3>').replace(/^## (.+)$/gm,'<h2>$1</h2>').replace(/^# (.+)$/gm,'<h1>$1</h1>').replace(/^- (.+)$/gm,'<li>$1</li>').replace(/^---+\s*$/gm,'<hr>').replace(/\n/g,'<br>');
+}
+function fmtTime(d){
+    if(!d)return'';
+    const t=new Date(d);
+    return t.getFullYear()+'-'+String(t.getMonth()+1).padStart(2,'0')+'-'+String(t.getDate()).padStart(2,'0')+' '+String(t.getHours()).padStart(2,'0')+':'+String(t.getMinutes()).padStart(2,'0');
+}
+function esc(s){if(!s)return'';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+</script>
+</body>
+</html>

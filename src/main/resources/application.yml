@@ -1,0 +1,99 @@
+server:
+  port: 8080
+  error:
+    include-message: always
+    include-stacktrace: never
+
+spring:
+  application:
+    name: ai-review-assistant
+  mvc:
+    favicon:
+      enabled: false
+
+  # PostgreSQL 数据库配置
+  # 默认连接 Docker 中的 pgvector PostgreSQL (docker-compose.yml)
+  # 如果本地有 PostgreSQL 占用 5432 端口，请先停止: brew services stop postgresql@16
+  datasource:
+    url: jdbc:postgresql://localhost:5432/review_db?currentSchema=public&connectTimeout=60&socketTimeout=60
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:postgres}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      idle-timeout: 300000
+      connection-timeout: 20000
+
+  ai:
+    dashscope:
+      api-key: ${DASHSCOPE_API_KEY:}
+      chat:
+        options:
+          # 模型名称由 ai.model.name 统一接管，此处保留默认值作为 fallback
+          model: qwen-plus
+          temperature: 0.9
+    vectorstore:
+      pgvector:
+        index-type: HNSW
+        distance-type: COSINE_DISTANCE
+        dimensions: 1536
+        initialize-schema: true
+        max-document-batch-size: 1000
+  servlet:
+    multipart:
+      enabled: true              # 启用文件上传
+      max-file-size: 10MB        # 单个文件最大大小
+      max-request-size: 10MB     # 请求最大大小
+
+# 统一模型配置：切换模型只需改 ai.model.name
+ai:
+  model:
+    provider: dashscope
+    name: qwen-plus
+    temperature: 0.9
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    cache-enabled: false
+    log-impl: org.apache.ibatis.logging.slf4j.Slf4jImpl
+  global-config:
+    db-config:
+      id-type: auto
+
+# 业务配置
+app:
+  jwt:
+    secret: ${JWT_SECRET:ai-review-assistant-jwt-secret-key-2024-change-in-production-please-use-a-longer-secret-key-256bits-minimum}
+    access-expiration-ms: 900000      # 15分钟
+    refresh-expiration-ms: 604800000   # 7天
+  conversation:
+    expire-days: 30  # 会话过期天数，超过后自动清理
+  rag:
+    top-k: 3                      # RAG 默认召回数量
+    similarity-threshold: 0.5     # 向量相似度阈值
+    rerank-enabled: true          # 是否启用关键词重排序
+    rerank-candidate-multiplier: 2  # 重排序候选倍数
+
+# Actuator 与 Micrometer 配置
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when-authorized
+      show-components: always
+    metrics:
+      enabled: true
+    prometheus:
+      enabled: true
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}

@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>测验 - AI Review Assistant</title>
+    <link rel="stylesheet" href="/css/common.css">
+    <style>
+        .gen-bar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+        .gen-bar input, .gen-bar select {
+            border-radius: var(--radius-md);
+            border: 2px solid var(--border);
+            padding: 10px 16px;
+            font-size: 14px;
+            font-family: inherit;
+            transition: all var(--t-fast) var(--ease);
+        }
+        .gen-bar input:focus { border-color: var(--primary); outline: none; box-shadow: 0 0 0 4px rgba(124,58,237,.1); }
+        .question-card {
+            background: var(--bg-subtle);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 24px;
+            margin-bottom: 16px;
+        }
+        .q-title { font-weight: 600; color: var(--text); margin-bottom: 16px; font-size: 15px; line-height: 1.8; }
+        .option-list { display: flex; flex-direction: column; gap: 10px; }
+        .option-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            padding: 12px 16px;
+            border: 2px solid var(--border);
+            border-radius: var(--radius-md);
+            cursor: pointer;
+            transition: all var(--t-fast) var(--ease);
+            font-size: 14px;
+            background: var(--surface);
+        }
+        .option-item:hover { border-color: var(--primary); background: var(--primary-50); }
+        .option-item.selected { border-color: var(--primary); background: var(--primary-50); }
+        .option-item.correct { border-color: var(--success); background: var(--success-light); }
+        .option-item.wrong { border-color: var(--danger); background: var(--danger-light); }
+        .option-item input { margin-top: 4px; }
+        .score-panel {
+            text-align: center;
+            padding: 40px;
+            background: var(--gradient-primary);
+            border-radius: var(--radius-xl);
+            color: #fff;
+            margin-bottom: 20px;
+            box-shadow: var(--shadow-colored);
+        }
+        .score-panel .big { font-size: 56px; font-weight: 700; }
+        .score-panel .sub { font-size: 16px; opacity: .9; margin-top: 8px; }
+        .wrong-item {
+            background: var(--danger-light);
+            border: 1px solid var(--danger);
+            border-radius: var(--radius-md);
+            padding: 14px 18px;
+            margin-bottom: 10px;
+            font-size: 14px;
+            line-height: 1.7;
+        }
+    </style>
+</head>
+<body>
+<nav class="navbar">
+    <div class="navbar-inner">
+        <a class="navbar-brand" href="/"><span class="brand-icon">📚</span>AI Review Assistant</a>
+        <div class="nav-links">
+            <a href="/">💬 对话</a>
+            <a href="/courses.html">📖 课程</a>
+            <a href="/knowledge.html">📚 知识库</a>
+            <a class="active" href="/quiz.html">📝 测验</a>
+            <a href="/plan.html">📅 计划</a>
+            <a href="/stats.html">📊 统计</a>
+            <div class="nav-user">
+                <span class="nav-avatar" id="userAvatar">G</span>
+                <span class="nav-nickname" id="userNickname">访客</span>
+            </div>
+            <button class="nav-logout" onclick="logout()" id="logoutBtn" style="display:none">退出</button>
+        </div>
+    </div>
+</nav>
+<style>
+.hint-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--primary-50); border: 1px solid var(--primary-200);
+    border-radius: var(--radius-md); padding: 14px 18px; margin-bottom: 16px;
+}
+.hint-bar span { font-size: 14px; color: var(--primary); }
+.empty-state { text-align: center; padding: 60px 20px; color: var(--text-muted); }
+.empty-state .big { font-size: 48px; margin-bottom: 12px; }
+.empty-state h4 { color: var(--text); margin-bottom: 8px; }
+</style>
+<div class="page-body">
+    <div class="card">
+        <div class="card-header">
+            <div class="card-title"><span class="title-icon">📝</span>练习测验</div>
+        </div>
+        <div class="hint-bar">
+            <span>💡 在「对话」中让 AI 生成测验，点击"开始作答"后会自动跳转到这里练习。</span>
+            <a href="/" class="btn btn-primary btn-sm">去对话</a>
+        </div>
+        <div id="quizArea" style="display:none"></div>
+        <div id="emptyArea"></div>
+        <div id="resultPanel" style="display:none"></div>
+    </div>
+</div>
+<script>
+const token=localStorage.getItem('token');
+let questions=[];
+let currentTopic='';
+const _origFetch=window.fetch;
+window.fetch=function(...a){return _origFetch.apply(this,a).then(r=>{if(r.status===401&&token){localStorage.removeItem('token');window.location.href='/login.html'}return r})};
+document.addEventListener('DOMContentLoaded',()=>{
+    if(!token){window.location.href='/login.html';return}
+    const n=localStorage.getItem('nickname')||localStorage.getItem('username')||'';
+    document.getElementById('userNickname').textContent=n;
+    document.getElementById('userAvatar').textContent=n.charAt(0).toUpperCase();
+    document.getElementById('logoutBtn').style.display='inline';
+    loadQuizFromStorage();
+});
+function logout(){localStorage.clear();window.location.href='/login.html'}
+function authHeaders(ct){const h={};if(ct)h['Content-Type']=ct;if(token)h['Authorization']='Bearer '+token;return h}
+function loadQuizFromStorage(){
+    const md=localStorage.getItem('currentQuizMarkdown');
+    const topic=localStorage.getItem('currentQuizTopic')||'';
+    if(md){
+        currentTopic=topic;
+        questions=parseQuizText(md);
+        const saved=localStorage.getItem('currentQuizAnswers');
+        const submitted=localStorage.getItem('currentQuizSubmitted')==='true';
+        if(saved){
+            try{
+                const answers=JSON.parse(saved);
+                questions.forEach(q=>{ if(answers[q.no]) q.userAnswer=answers[q.no]; });
+            }catch(e){}
+        }
+        renderQuiz();
+        if(submitted){
+            restoreSubmittedState();
+            restoreResultPanel();
+        }
+    } else {
+        showEmpty();
+    }
+}
+function showEmpty(){
+    document.getElementById('quizArea').style.display='none';
+    document.getElementById('resultPanel').style.display='none';
+    document.getElementById('emptyArea').innerHTML='<div class="empty-state"><div class="big">📝</div><h4>暂无测验</h4><p>去对话中让 AI 生成测验，点击"开始作答"即可在此练习</p><a href="/" class="btn btn-primary">去对话</a></div>';
+}
+function parseQuizText(text){
+    const qs=[];
+    // 按 Markdown 题目标题分块，支持 "### 题目 1：..." 或 "###题目1："
+    // 标题后的空白/学科不消耗，保留在块内以便剥离
+    const parts=text.split(/(?:^|\n)\s*#{1,3}\s*题目\s*\d+[：:]/m).filter(Boolean);
+    // 第一段可能是引导语，若不含任何选项则跳过
+    const startIndex = (parts[0] && !/[A-Da-d][.．、]/.test(parts[0])) ? 1 : 0;
+    for(let i=startIndex;i<parts.length;i++){
+        const q=parseSingleQuestion(parts[i].trim(), qs.length+1);
+        if(q) qs.push(q);
+    }
+    // 兜底：整块作为一题
+    if(!qs.length && text.trim()){
+        const q=parseSingleQuestion(text.trim(), 1);
+        if(q){ qs.push(q); }
+        else { qs.push({no:1,question:text.trim(),options:{},correctAnswer:'',explanation:'',userAnswer:null}); }
+    }
+    return qs;
+}
+function parseSingleQuestion(body, no){
+    if(!body) return null;
+    // 去掉引导语（如"好的，这里为你准备了..."）
+    body=body.replace(/^好的[，,].*?选择题[。!！]?\s*/,'').trim();
+    // 去掉块首可能的学科短标题（格式："操作系统\n\n题目文本..."）
+    const lines=body.split('\n');
+    if(lines.length>=2){
+        const first=lines[0].trim();
+        const second=lines[1].trim();
+        if(!second && first && first.length<=14 && !/[?？]/.test(first) && !/[A-Da-d][.．、]/.test(first)){
+            lines.splice(0,2);
+            body=lines.join('\n').trim();
+        }
+    }
+    // 答案
+    let answer='';
+    const answerMatch=body.match(/\*\*答案[：:]\s*([A-Da-d])\*\*/);
+    if(answerMatch){ answer=answerMatch[1].toUpperCase(); body=body.replace(answerMatch[0],''); }
+    else {
+        const ansFallback=body.match(/答案[：:]\s*([A-Da-d])/);
+        if(ansFallback){ answer=ansFallback[1].toUpperCase(); body=body.replace(ansFallback[0],''); }
+    }
+    // 解析
+    let explanation='';
+    const expMatch=body.match(/\*\*解析[：:]\*\*\s*([\s\S]*?)$/);
+    if(expMatch){ explanation=expMatch[1].trim(); body=body.replace(expMatch[0],''); }
+    else {
+        const expFallback=body.match(/解析[：:]\s*([\s\S]*?)$/);
+        if(expFallback){ explanation=expFallback[1].trim(); body=body.replace(expFallback[0],''); }
+    }
+    // 清理解析：去掉列表前缀（要求后面有空格，避免误删 --- 分隔线）、合并空行、去掉末尾分隔线
+    explanation=explanation.replace(/^[-*]\s+/gm,'').replace(/\n\s*\n/g,'\n').replace(/\n?\s*---+\s*$/,'').trim();
+    // 选项
+    const options={A:'',B:'',C:'',D:''};
+    let firstOptIndex=-1;
+    const optRegex=/([A-Da-d])[.．、]\s*([\s\S]*?)(?=(?:[A-Da-d][.．、])|(?:\*\*答案)|(?:答案)|(?:\*\*解析)|(?:解析)|$)/g;
+    let m;
+    while((m=optRegex.exec(body))!==null){
+        if(firstOptIndex===-1) firstOptIndex=m.index;
+        const label=m[1].toUpperCase();
+        if(options[label]) continue; // 防止重复
+        options[label]=m[2].replace(/\s+/g,' ').trim();
+    }
+    if(firstOptIndex===-1 && !options.A && !options.B) return null;
+    // 题干 = 选项前面的内容
+    let question=firstOptIndex>=0 ? body.substring(0, firstOptIndex).trim() : body.trim();
+    question=question.replace(/^[\n\s]*/,'').replace(/\s+/g,' ').trim();
+    // 兜底去掉题干开头可能的学科前缀（如"数据库原理 在..."→"在..."）
+    if(currentTopic){
+        question=question.replace(new RegExp('^'+escapeRegExp(currentTopic)+'(基础|原理|概论|导论)?[\\s：:]'),'');
+    }
+    if(!question && !options.A) return null;
+    return {no, question, options, correctAnswer:answer, explanation, userAnswer:null};
+}
+function escapeRegExp(s){
+    return s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+}
+function mdInline(s){
+    if(!s) return '';
+    return esc(s)
+        // 标准代码块 ```\n...\n``` 或 ```lang\n...\n```
+        .replace(/```(?:\w+)?\n([\s\S]*?)```/g,'<pre style="background:#f3f4f6;padding:10px 14px;border-radius:8px;overflow-x:auto;font-size:13px;margin:8px 0"><code>$1</code></pre>')
+        // 模型把 ```sql 和代码挤在同一行：```sql CREATE VIEW ...
+        .replace(/```(\w+)\s+([\s\S]*?)```/g,'<pre style="background:#f3f4f6;padding:10px 14px;border-radius:8px;overflow-x:auto;font-size:13px;margin:8px 0"><code>$2</code></pre>')
+        .replace(/`([^`]+)`/g,'<code style="background:#f3f4f6;padding:2px 6px;border-radius:4px;font-size:13px">$1</code>')
+        .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
+}
+function mdBlock(s){
+    if(!s) return '';
+    return mdInline(s).replace(/\n/g,'<br>');
+}
+function renderQuiz(){
+    const a=document.getElementById('quizArea');
+    a.style.display='block';
+    a.innerHTML='<div class="card"><div class="card-header"><div class="card-title"><span class="title-icon">✅</span>回答问题（共 '+questions.length+' 题）</div></div>'+questions.map(q=>{
+        const opts=Object.entries(q.options).filter(([k,v])=>v);
+        return '<div class="question-card" id="q'+q.no+'"><div class="q-title">'+q.no+'. '+mdInline(q.question)+'</div><div class="option-list">'+opts.map(([k,v])=>'<label class="option-item" id="opt'+q.no+'_'+k+'" onclick="selectOption('+q.no+',\''+k+'\')"><input type="radio" name="q'+q.no+'" value="'+k+'"> <span><strong>'+k+'.</strong> '+mdInline(v)+'</span></label>').join('')+'</div><div style="margin-top:12px;padding:12px 16px;background:var(--warning-light);border-radius:var(--radius-md);font-size:13px;color:#b45309;display:none" id="exp'+q.no+'">'+mdBlock(q.explanation)+'</div></div>';
+    }).join('')+'<div style="text-align:center;margin-top:12px"><button class="btn btn-primary" onclick="submitQuiz()" id="submitBtn">提交批改</button></div></div>';
+    // 渲染后立即恢复已选答案（从 localStorage 或 questions 数组）
+    restoreSelectedAnswers();
+}
+
+function restoreSelectedAnswers(){
+    questions.forEach(q=>{
+        if(q.userAnswer){
+            const el=document.getElementById('opt'+q.no+'_'+q.userAnswer);
+            if(el)el.classList.add('selected');
+        }
+    });
+}
+
+// 恢复已提交状态（刷新后重新高亮答案、显示解析、禁用修改）
+function restoreSubmittedState(){
+    restoreSelectedAnswers();
+    questions.forEach(q=>{
+        const correctEl=document.getElementById('opt'+q.no+'_'+q.correctAnswer);
+        if(correctEl)correctEl.classList.add('correct');
+        const userEl=q.userAnswer!==q.correctAnswer?document.getElementById('opt'+q.no+'_'+q.userAnswer):null;
+        if(userEl)userEl.classList.add('wrong');
+        if(q.explanation)document.getElementById('exp'+q.no).style.display='block';
+    });
+    const btn=document.getElementById('submitBtn');
+    if(btn){
+        btn.textContent='重新提交';
+        btn.disabled=false;
+    }
+    // 显示新一轮按钮
+    showNewRoundButton();
+}
+
+function showNewRoundButton(){
+    const existing=document.getElementById('newRoundBtn');
+    if(existing)return;
+    const wrap=document.createElement('div');
+    wrap.style.cssText='text-align:center;margin-top:12px';
+    wrap.innerHTML='<button class="btn btn-secondary" id="newRoundBtn" onclick="startNewRound()">🔄 开启新一轮测验</button>';
+    const quizArea=document.getElementById('quizArea');
+    if(quizArea)quizArea.appendChild(wrap);
+}
+
+function startNewRound(){
+    // 只清除当前测验状态，保留对话记录
+    localStorage.removeItem('currentQuizMarkdown');
+    localStorage.removeItem('currentQuizTopic');
+    localStorage.removeItem('currentQuizAnswers');
+    localStorage.removeItem('currentQuizSubmitted');
+    window.location.href='/';
+}
+function selectOption(qNo,opt){
+    // 如果已经提交批改，禁止修改答案
+    if(localStorage.getItem('currentQuizSubmitted')==='true')return;
+    questions[qNo-1].userAnswer=opt;
+    saveQuizAnswers();
+    const c=document.getElementById('q'+qNo);
+    c.querySelectorAll('.option-item').forEach(el=>el.classList.remove('selected'));
+    document.getElementById('opt'+qNo+'_'+opt).classList.add('selected');
+}
+function saveQuizAnswers(){
+    const answers={};
+    questions.forEach(q=>{ if(q.userAnswer) answers[q.no]=q.userAnswer; });
+    localStorage.setItem('currentQuizAnswers',JSON.stringify(answers));
+}
+async function submitQuiz(){
+    const unanswered=questions.filter(q=>!q.userAnswer);
+    if(unanswered.length>0){alert('还有 '+unanswered.length+' 题未作答');return}
+    const btn=document.getElementById('submitBtn');
+    btn.disabled=true;
+    btn.textContent='批改中...';
+    try{
+        const body={
+            courseId:parseInt(localStorage.getItem('currentCourseId'))||null,
+            topic:currentTopic,
+            answers:questions.map(q=>({
+                questionNo:q.no,
+                question:q.question,
+                options:Object.entries(q.options).map(([k,v])=>k+'. '+v).join('\n'),
+                userAnswer:q.userAnswer,
+                correctAnswer:q.correctAnswer,
+                explanation:q.explanation
+            }))
+        };
+        const r=await fetch('/api/quiz/grade',{method:'POST',headers:authHeaders('application/json'),body:JSON.stringify(body)});
+        const d=await r.json();
+        const result=d.code===0?d.data:null;
+        if(result){
+            localStorage.setItem('currentQuizSubmitted','true');
+            saveQuizAnswers();
+            localStorage.setItem('currentQuizResult',JSON.stringify(result));
+            showResult(result);highlightAnswers(result);showNewRoundButton();
+        }
+    } catch(e) { alert('批改失败: '+e.message); } finally {
+        btn.disabled=false;
+        if(localStorage.getItem('currentQuizSubmitted')==='true'){
+            btn.textContent='重新提交';
+        } else {
+            btn.textContent='提交批改';
+        }
+    }
+}
+function showResult(result){
+    const p=document.getElementById('resultPanel');
+    p.style.display='block';
+    p.dataset.resultJson=JSON.stringify(result);
+    p.innerHTML='<div class="score-panel"><div class="big">'+result.accuracyRate+'%</div><div class="sub">'+result.correctCount+' / '+result.totalQuestions+' 正确</div></div>'+(result.wrongCount>0?'<div class="card"><div class="card-header"><div class="card-title"><span class="title-icon">❌</span>错误题目</div></div>'+result.results.filter(r=>!r.correct).map(r=>'<div class="wrong-item"><strong>'+r.questionNo+'. '+esc(r.question)+'</strong><br>你的答案: <span style="color:var(--danger)">'+r.userAnswer+'</span> | 正确答案: <span style="color:var(--success)">'+r.correctAnswer+'</span>'+(r.explanation?'<br>'+esc(r.explanation):'')+'</div>').join('')+'</div>':'<div class="card text-center" style="color:var(--success);font-size:16px;padding:40px">全部正确，太棒了！</div>');
+    p.scrollIntoView({behavior:'smooth'});
+}
+function restoreResultPanel(){
+    const p=document.getElementById('resultPanel');
+    if(!p)return;
+    const json=p.dataset.resultJson||localStorage.getItem('currentQuizResult');
+    if(!json)return;
+    try{
+        const result=JSON.parse(json);
+        showResult(result);
+    }catch(e){}
+}
+function highlightAnswers(result){
+    result.results.forEach(r=>{
+        const c=document.getElementById('q'+r.questionNo);
+        if(!c)return;
+        const correctEl=document.getElementById('opt'+r.questionNo+'_'+r.correctAnswer);
+        const userEl=r.userAnswer!==r.correctAnswer?document.getElementById('opt'+r.questionNo+'_'+r.userAnswer):null;
+        if(correctEl){
+            c.querySelectorAll('.option-item').forEach(el=>el.classList.remove('correct'));
+            correctEl.classList.add('correct');
+        }
+        if(userEl){
+            userEl.classList.remove('selected');
+            userEl.classList.add('wrong');
+        }
+        if(r.explanation)document.getElementById('exp'+r.questionNo).style.display='block';
+    });
+}
+function esc(s){if(!s)return'';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+</script>
+</body>
+</html>

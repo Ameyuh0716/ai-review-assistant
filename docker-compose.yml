@@ -1,0 +1,29 @@
+version: '3.8'
+
+# 项目默认使用 Docker 中的 PostgreSQL + pgvector
+# 确保本地没有其他 PostgreSQL 占用 5432 端口
+# 如果有: brew services stop postgresql@16
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: ai-review-postgres
+    environment:
+      POSTGRES_DB: review_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "127.0.0.1:5432:5432"   # 仅绑定 localhost，避免暴露到外网
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d review_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

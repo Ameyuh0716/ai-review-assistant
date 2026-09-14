@@ -1,0 +1,64 @@
+package com.aiservice.aireviewassistant.controller;
+
+import com.aiservice.aireviewassistant.dto.KnowledgeChunkDto;
+import com.aiservice.aireviewassistant.service.DocumentService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+// 知识库管理控制器：管理课程下的向量文档
+@Tag(name = "知识库管理", description = "查看、统计、删除课程下的向量分块")
+@RestController
+@RequestMapping("/api/knowledge-base")
+public class KnowledgeBaseController {
+
+    private final DocumentService documentService;
+
+    public KnowledgeBaseController(DocumentService documentService) {
+        this.documentService = documentService;
+    }
+
+    // 查询课程下的向量分块（支持分页）
+    @Operation(summary = "查询课程下的向量分块")
+    @GetMapping("/{courseId}/chunks")
+    public Map<String, Object> listChunks(
+            @PathVariable Integer courseId,
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "20") int pageSize) {
+        pageSize = Math.min(pageSize, 100); // 最大100条/页
+        List<KnowledgeChunkDto> chunks = documentService.listChunks(courseId, page, pageSize);
+        long total = documentService.countChunks(courseId);
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("items", chunks);
+        result.put("total", total);
+        result.put("page", page);
+        result.put("pageSize", pageSize);
+        result.put("totalPages", (total + pageSize - 1) / pageSize);
+        return result;
+    }
+
+    // 统计课程下的向量分块数量
+    @Operation(summary = "统计课程下的向量分块数量")
+    @GetMapping("/{courseId}/count")
+    public Map<String, Long> countChunks(@PathVariable Integer courseId) {
+        Map<String, Long> result = new HashMap<>();
+        result.put("count", documentService.countChunks(courseId));
+        return result;
+    }
+
+    // 删除课程下的所有向量分块
+    @Operation(summary = "删除课程下的所有向量分块")
+    @DeleteMapping("/{courseId}")
+    public Map<String, Object> deleteChunks(@PathVariable Integer courseId) {
+        int deleted = documentService.deleteChunksByCourseId(courseId);
+        Map<String, Object> result = new HashMap<>();
+        result.put("deleted", deleted);
+        result.put("success", true);
+        return result;
+    }
+}

@@ -1,0 +1,94 @@
+# 生产环境配置
+# 使用方式: java -jar app.jar --spring.profiles.active=prod
+# 或 export SPRING_PROFILES_ACTIVE=prod
+
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/review_db?currentSchema=public&connectTimeout=60&socketTimeout=60}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      idle-timeout: 300000
+      connection-timeout: 20000
+
+  ai:
+    dashscope:
+      api-key: ${DASHSCOPE_API_KEY}
+    vectorstore:
+      pgvector:
+        index-type: HNSW
+        distance-type: COSINE_DISTANCE
+        dimensions: 1536
+        initialize-schema: false  # 生产环境不自动建表
+        max-document-batch-size: 1000
+
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: 20MB
+      max-request-size: 20MB
+
+  cache:
+    caffeine:
+      spec: maximumSize=2000,expireAfterWrite=15m,recordStats
+
+# AI 模型配置
+ai:
+  model:
+    provider: ${AI_PROVIDER:dashscope}
+    name: ${AI_MODEL:qwen-plus}
+    temperature: ${AI_TEMPERATURE:0.7}
+    api-key: ${DASHSCOPE_API_KEY:}
+    base-url: ${AI_BASE_URL:}
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+    cache-enabled: false
+  global-config:
+    db-config:
+      id-type: auto
+
+# 业务配置
+app:
+  jwt:
+    secret: ${JWT_SECRET:ai-review-assistant-jwt-secret-key-2024-change-in-production-please-use-a-longer-secret-key-256bits-minimum}
+    access-expiration-ms: 900000      # 15分钟
+    refresh-expiration-ms: 604800000  # 7天
+  conversation:
+    expire-days: 30
+  rag:
+    top-k: 5
+    similarity-threshold: 0.5
+    rerank-enabled: true
+    rerank-candidate-multiplier: 2
+
+# Actuator - 生产环境仅暴露必要端点
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when-authorized
+    metrics:
+      enabled: true
+    prometheus:
+      enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+# 日志 - 生产环境只输出 WARN 以上
+logging:
+  level:
+    root: WARN
+    com.aiservice: INFO
+    org.springframework: WARN
