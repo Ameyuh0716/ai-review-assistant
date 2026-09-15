@@ -3,24 +3,27 @@ package com.aiservice.aireviewassistant.config;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
-// AI 模型配置属性：支持切换不同模型供应商和模型名称
+/**
+ * AI 模型配置属性类。
+ * <p>绑定前缀为 {@code ai.model} 的配置项，用于切换不同的模型供应商、模型名称及连接参数。</p>
+ */
 @Component
 @ConfigurationProperties(prefix = "ai.model")
 public class ModelProperties {
 
-    // 模型供应商：dashscope、openai、ollama 等
+    /** 模型供应商，默认 {@code dashscope}；可选值：dashscope、openai、ollama。 */
     private String provider = "dashscope";
 
-    // 模型名称
+    /** 模型名称，默认 {@code qwen-plus}。 */
     private String name = "qwen-plus";
 
-    // 温度参数
+    /** 模型温度参数，默认 {@code 0.9}；值越大生成结果越随机。 */
     private Double temperature = 0.9;
 
-    // API Key（OpenAI / DashScope 等需要）
+    /** API Key，OpenAI / DashScope 等云端供应商需要配置。 */
     private String apiKey;
 
-    // 基础 URL（Ollama / OpenAI 代理需要）
+    /** 基础 URL，用于 Ollama 本地服务或 OpenAI 代理场景。 */
     private String baseUrl;
 
     public String getProvider() {

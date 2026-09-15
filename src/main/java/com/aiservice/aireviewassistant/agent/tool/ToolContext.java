@@ -4,7 +4,11 @@ import com.aiservice.aireviewassistant.entity.Message;
 import java.util.List;
 import java.util.Map;
 
-// 工具执行上下文：封装一次工具调用所需的全部信息
+/**
+ * 工具执行上下文。
+ * <p>
+ * 封装一次工具调用所需的全部信息，包括用户原始消息、当前会话 ID、意图识别提取的参数以及历史消息。
+ */
 public class ToolContext {
 
     // 用户原始消息
@@ -19,6 +23,14 @@ public class ToolContext {
     // 历史消息列表
     private final List<Message> history;
 
+    /**
+     * 构造工具执行上下文。
+     *
+     * @param userMessage 用户原始消息
+     * @param conversationId 当前会话 ID
+     * @param parameters 意图识别提取的参数
+     * @param history 历史消息列表
+     */
     public ToolContext(String userMessage, Integer conversationId,
                        Map<String, String> parameters, List<Message> history) {
         this.userMessage = userMessage;

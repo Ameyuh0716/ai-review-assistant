@@ -8,33 +8,39 @@ import java.time.LocalDateTime;
 import lombok.Getter;
 import lombok.Setter;
 
-// 课程表：存储课程基本信息，如课程名称、描述等
+/**
+ * 课程表。
+ * <p>
+ * 存储用户创建的课程基本信息，包括课程名称、描述及所属用户，
+ * 用于组织学习资料、复习计划与错题本。
+ * </p>
+ */
 @Getter
 @Setter
 @TableName("courses")
 public class Courses {
 
-    // 课程ID
+    /** 课程主键，自增。 */
     @TableId(value = "id", type = IdType.AUTO)
     private Integer id;
 
-    // 关联用户ID
+    /** 课程所属用户 ID，对应 {@link AppUser#id}。 */
     @TableField("user_id")
     private Integer userId;
 
-    // 课程名称
+    /** 课程名称。 */
     @TableField("name")
     private String name;
 
-    // 课程描述
+    /** 课程描述，补充说明课程范围或学习目标。 */
     @TableField("description")
     private String description;
 
-    // 创建时间
+    /** 课程创建时间。 */
     @TableField("created_at")
     private LocalDateTime createdAt;
 
-    // 更新时间
+    /** 课程最后更新时间。 */
     @TableField("updated_at")
     private LocalDateTime updatedAt;
 }

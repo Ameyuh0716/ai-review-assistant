@@ -23,6 +23,16 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * RAG（检索增强生成）服务实现类。
+ * <p>
+ * 核心职责：
+ * 1. 将用户问题通过向量库进行相似度检索，召回课程知识库中的相关片段；
+ * 2. 支持配置化的重排序策略，基于关键词命中加权优化 TopK 结果；
+ * 3. 将检索上下文注入系统提示词，调用大模型完成同步或流式回答；
+ * 4. 记录检索日志与 Prometheus 指标，便于后续审计与性能监控。
+ * </p>
+ */
 @Slf4j
 @Service
 public class RagServiceImpl implements RagService {
@@ -35,6 +45,17 @@ public class RagServiceImpl implements RagService {
     private final AgentMetrics agentMetrics;
     private final ObjectMapper objectMapper;
 
+    /**
+     * 构造方法：注入 RAG 所需的大模型客户端、向量库、提示词模板、检索日志服务等依赖。
+     *
+     * @param chatClient         Spring AI 大模型聊天客户端
+     * @param vectorStore        向量存储（PgVectorStore），用于相似度检索
+     * @param promptTemplate     提示词模板渲染器
+     * @param ragSearchLogService RAG 检索日志服务，用于持久化检索与调用日志
+     * @param ragProperties      RAG 配置属性（TopK、阈值、重排序开关等）
+     * @param agentMetrics        Agent 调用指标收集器
+     * @param objectMapper       JSON 序列化工具，用于记录检索片段
+     */
     public RagServiceImpl(ChatClient chatClient, VectorStore vectorStore,
                           PromptTemplate promptTemplate, RagSearchLogService ragSearchLogService,
                           RagProperties ragProperties, AgentMetrics agentMetrics,
@@ -48,6 +69,17 @@ public class RagServiceImpl implements RagService {
         this.objectMapper = objectMapper;
     }
 
+    /**
+     * 同步 RAG 问答：先检索知识库，再调用大模型生成一次性答案。
+     * <p>
+     * 使用 Spring Cache 对结果进行缓存，缓存键由问题与会话 ID 组成；
+     * 未命中知识库时直接调用大模型，避免空上下文污染答案。
+     * </p>
+     *
+     * @param question       用户问题
+     * @param conversationId 当前会话 ID
+     * @return 大模型生成的回答文本
+     */
     @Override
     @Cacheable(value = "agentResults", key = "'rag:' + #question + ':' + (#conversationId != null ? #conversationId : 0)")
     public String answerQuestion(String question, Integer conversationId) {
@@ -56,6 +88,7 @@ public class RagServiceImpl implements RagService {
         logSearch(question, conversationId, searchResult, null,
             System.currentTimeMillis() - startTime, true, null);
 
+        // 未命中知识库：直接调用大模型，不注入 RAG 上下文
         if (searchResult.isEmpty()) {
             return chatClient.prompt()
                 .user(question)
@@ -63,6 +96,7 @@ public class RagServiceImpl implements RagService {
                 .content();
         }
 
+        // 命中知识库：渲染 RAG 系统提示词，将上下文注入 system 角色
         String systemPrompt = promptTemplate.render("rag-system.txt", Map.of("context", searchResult.context()));
         return chatClient.prompt()
             .system(systemPrompt)
@@ -71,19 +105,26 @@ public class RagServiceImpl implements RagService {
             .content();
     }
 
+    /**
+     * 流式 RAG 问答：先检索知识库，再以 SSE 方式流式返回答案。
+     *
+     * @param question       用户问题
+     * @param conversationId 当前会话 ID
+     * @return 按 Token 流式推送的回答字符串流
+     */
     @Override
     public Flux<String> answerQuestionStream(String question, Integer conversationId) {
         SearchResult searchResult = searchDocuments(question);
 
         if (searchResult.isEmpty()) {
-            // 无知识库命中，直接流式调用 LLM
+            // 无知识库命中，直接流式调用 LLM，减少不必要的提示词长度
             return chatClient.prompt()
                 .user(question)
                 .stream()
                 .content();
         }
 
-        // 有知识库命中，用 RAG 上下文流式生成
+        // 有知识库命中，用 RAG 上下文流式生成，兼顾实时性与事实性
         String systemPrompt = promptTemplate.render("rag-system.txt", Map.of("context", searchResult.context()));
         return chatClient.prompt()
             .system(systemPrompt)
@@ -92,22 +133,45 @@ public class RagServiceImpl implements RagService {
             .content();
     }
 
+    /**
+     * 检索与查询相关的知识库上下文，返回拼接后的文本块。
+     *
+     * @param query          查询文本
+     * @param conversationId 当前会话 ID
+     * @return 拼接后的知识库上下文；无命中时返回空字符串
+     */
     @Override
     public String retrieveContext(String query, Integer conversationId) {
         SearchResult searchResult = searchDocuments(query);
         return searchResult.context();
     }
 
-    // 执行向量检索，支持配置化参数与关键词重排序
+    /**
+     * 执行向量相似度检索，并将命中文档拼接为上下文。
+     * <p>
+     * 流程：
+     * 1. 根据配置决定初始召回数量（若启用重排序则扩大候选集）；
+     * 2. 调用向量库 similaritySearch 召回文档；
+     * 3. 如启用重排序，基于关键词匹配对候选文档二次排序并截取 TopK；
+     * 4. 将文档内容拼接为上下文，并将片段元数据序列化为 JSON 用于日志。
+     * 检索耗时与召回数量会被记录到 Prometheus 指标。
+     * </p>
+     *
+     * @param question 用户问题或查询文本
+     * @return 检索结果封装，包括命中数量、JSON 片段、拼接上下文
+     */
     private SearchResult searchDocuments(String question) {
         long searchStart = System.currentTimeMillis();
         List<Document> docs = null;
         try {
+            // 读取 RAG 配置：TopK、相似度阈值、重排序候选倍数
             int topK = ragProperties.getTopK();
             double threshold = ragProperties.getSimilarityThreshold();
             int candidateMultiplier = ragProperties.getRerankCandidateMultiplier();
+            // 若启用重排序，先召回 candidateMultiplier 倍文档作为候选集
             int searchTopK = ragProperties.isRerankEnabled() ? topK * candidateMultiplier : topK;
 
+            // 调用向量库执行相似度检索：query 向量化 + 向量空间最近邻搜索
             docs = vectorStore.similaritySearch(
                 SearchRequest.builder()
                     .query(question)
@@ -116,17 +180,19 @@ public class RagServiceImpl implements RagService {
                     .build()
             );
 
+            // 打印检索调试信息，便于排查召回与阈值问题
             log.debug("========== RAG 检索日志 ==========");
             log.debug("用户问题: {}", question);
             log.debug("相似度阈值: {}", threshold);
             log.debug("初始召回文档数: {}", docs.size());
 
-            // 启用重排序时，基于关键词匹配提升排序
+            // 启用重排序且候选集大于最终 TopK 时，基于关键词命中进行二次排序
             if (ragProperties.isRerankEnabled() && docs.size() > topK) {
                 docs = rerankByKeywords(question, docs, topK);
                 log.debug("重排序后文档数: {}", docs.size());
             }
 
+            // 构建供日志记录的 JSON 片段与供模型使用的拼接上下文
             List<Map<String, Object>> chunks = new ArrayList<>();
             StringBuilder contextBuilder = new StringBuilder();
             for (int i = 0; i < docs.size(); i++) {
@@ -142,6 +208,7 @@ public class RagServiceImpl implements RagService {
                 chunk.put("metadata", doc.getMetadata());
                 chunks.add(chunk);
 
+                // 多个文档之间用分隔线拼接，便于模型区分不同来源
                 contextBuilder.append(doc.getText());
                 if (i < docs.size() - 1) {
                     contextBuilder.append("\n\n---\n\n");
@@ -149,29 +216,48 @@ public class RagServiceImpl implements RagService {
             }
             log.debug("================================");
 
+            // 将片段元数据序列化为 JSON 字符串，用于后续检索日志落库
             String chunksJson = objectMapper.writeValueAsString(chunks);
             return new SearchResult(docs.size(), chunksJson, contextBuilder.toString());
         } catch (Exception e) {
+            // 向量检索异常不阻断主流程，返回空结果，由上层决定是否直接调用大模型
             log.error("[RAG] 向量检索失败: {}", e.getMessage(), e);
             return new SearchResult(0, "[]", "");
         } finally {
+            // 无论成功失败都记录检索耗时与召回数量，保证指标完整性
             long searchDuration = System.currentTimeMillis() - searchStart;
             agentMetrics.recordRagSearch(searchDuration);
             agentMetrics.recordRagRetrieved(docs != null ? docs.size() : 0);
         }
     }
 
-    // 基于关键词匹配的重排序：向量分数 + 关键词命中加权
+    /**
+     * 基于关键词命中的重排序：在向量分数基础上增加关键词命中加权。
+     * <p>
+     * 实现要点：
+     * - 从问题中提取中英文/数字关键词（过滤标点）；
+     * - 每个长度大于 1 的关键词在文档文本中命中一次加 0.05 分；
+     * - 按综合分数降序排列后截取前 topK 篇文档。
+     * </p>
+     *
+     * @param question 用户问题
+     * @param docs     向量检索召回的候选文档
+     * @param topK     重排序后需要保留的文档数量
+     * @return 重排序并截断后的文档列表
+     */
     private List<Document> rerankByKeywords(String question, List<Document> docs, int topK) {
+        // 清理标点，仅保留中英文与数字，并按空白切分为关键词列表
         String[] keywords = question.replaceAll("[^\\u4e00-\\u9fa5a-zA-Z0-9]", " ")
             .toLowerCase()
             .split("\\s+");
 
+        // 计算每篇文档的综合得分：向量相似度分数 + 关键词命中加权
         List<ScoredDocument> scored = new ArrayList<>();
         for (Document doc : docs) {
             String text = doc.getText().toLowerCase();
             double keywordScore = 0;
             for (String keyword : keywords) {
+                // 仅对长度大于 1 的关键词计分，避免单字噪声
                 if (keyword.length() > 1 && text.contains(keyword)) {
                     keywordScore += 0.05;
                 }
@@ -180,6 +266,7 @@ public class RagServiceImpl implements RagService {
             scored.add(new ScoredDocument(doc, vectorScore + keywordScore));
         }
 
+        // 按综合得分降序排列并截取前 topK
         scored.sort(Comparator.comparingDouble(ScoredDocument::score).reversed());
         return scored.stream()
             .limit(topK)
@@ -187,7 +274,21 @@ public class RagServiceImpl implements RagService {
             .toList();
     }
 
-    // 记录RAG检索日志
+    /**
+     * 记录 RAG 检索日志到数据库，用于后续审计、统计与召回质量分析。
+     * <p>
+     * 日志内容包含查询文本、命中数量、TopK、相似度阈值、召回片段 JSON、
+     * 响应文本、总耗时、是否成功及异常信息。保存失败仅记录警告，不影响主流程。
+     * </p>
+     *
+     * @param question        用户查询
+     * @param conversationId  会话 ID
+     * @param searchResult    向量检索结果
+     * @param responseText    大模型生成的响应文本
+     * @param totalLatencyMs  本次问答总耗时（毫秒）
+     * @param success         是否成功
+     * @param errorMsg        错误信息；成功时为 null
+     */
     private void logSearch(String question, Integer conversationId, SearchResult searchResult,
                            String responseText, long totalLatencyMs,
                            boolean success, String errorMsg) {
@@ -210,14 +311,25 @@ public class RagServiceImpl implements RagService {
         }
     }
 
-    // 检索结果内部对象
+    /**
+     * 向量检索结果内部封装对象。
+     *
+     * @param count      命中文档数量
+     * @param chunksJson 检索片段 JSON 字符串，用于日志落库
+     * @param context    拼接后的上下文文本，用于注入系统提示词
+     */
     private record SearchResult(int count, String chunksJson, String context) {
         boolean isEmpty() {
             return count == 0;
         }
     }
 
-    // 带重排序分数的文档
+    /**
+     * 带重排序综合得分的文档包装对象。
+     *
+     * @param doc   Spring AI Document
+     * @param score 综合得分（向量分数 + 关键词加权）
+     */
     private record ScoredDocument(Document doc, double score) {
     }
 }

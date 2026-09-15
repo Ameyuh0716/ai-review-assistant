@@ -10,18 +10,37 @@ import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-// 工具链执行器：处理"先...再...然后..."形式的多步请求
+/**
+ * 工具链执行器。
+ * <p>
+ * 处理用户以"先……再……然后……"形式表达的多步请求，将其拆分为多个
+ * {@link ChainStep} 并按顺序调用对应的 {@link AgentTool}，同时支持主题在步骤间继承。
+ */
 @Slf4j
 @Component
 public class ChainExecutor {
 
+    /** 工具注册表，用于根据意图查找具体工具实例。 */
     private final ToolRegistry toolRegistry;
 
+    /**
+     * 构造工具链执行器。
+     *
+     * @param toolRegistry 工具注册表
+     */
     public ChainExecutor(ToolRegistry toolRegistry) {
         this.toolRegistry = toolRegistry;
     }
 
-    // 判断是否为链式请求：必须同时包含"先"和至少一个后续连接词
+    /**
+     * 判断用户消息是否为链式多步请求。
+     * <p>
+     * 必须同时包含"先"以及"再"/"然后"/"接着"等后续连接词；同时会排除"先说"、"先问"等
+     * 非工具链用法。
+     *
+     * @param message 用户原始消息
+     * @return 是链式请求返回 {@code true}，否则返回 {@code false}
+     */
     public boolean isChainRequest(String message) {
         if (!message.contains("先")) return false;
         // 排除"先说"、"先问"等非工具链用法
@@ -30,7 +49,15 @@ public class ChainExecutor {
         return cleaned.contains("再") || cleaned.contains("然后") || cleaned.contains("接着");
     }
 
-    // 解析链式请求为多个步骤
+    /**
+     * 将链式请求解析为有序的工具链步骤列表。
+     * <p>
+     * 按"先"、"再"、"然后"、"接着"等连接词拆分文本，对每个片段推断意图并映射到
+     * 对应的 {@link AgentTool}。最多解析 3 步，防止异常输入产生过多步骤。
+     *
+     * @param message 用户原始消息
+     * @return 解析后的步骤列表；无法解析时返回空列表
+     */
     public List<ChainStep> parseChain(String message) {
         List<ChainStep> steps = new ArrayList<>();
         String remaining = message.trim();
@@ -114,7 +141,17 @@ public class ChainExecutor {
         return new ChainStep(intent, params, tool);
     }
 
-    // 执行工具链，支持主题继承
+    /**
+     * 顺序执行解析后的工具链，并支持主题在步骤间继承。
+     * <p>
+     * 当前步骤缺少 {@code topic}、{@code courseName} 或 {@code concept} 时，会自动继承
+     * 上一步提取出的主题，使"先总结操作系统，再出 5 道题"这类表达更加自然。
+     *
+     * @param userMessage 用户原始消息
+     * @param conversationId 当前会话 ID
+     * @param history 历史消息列表
+     * @return 各步骤执行结果的拼接文本
+     */
     public String executeChain(String userMessage, Integer conversationId, List<Message> history) {
         List<ChainStep> steps = parseChain(userMessage);
         if (steps.isEmpty()) {
@@ -212,6 +249,12 @@ public class ChainExecutor {
         return "7天";
     }
 
-    // 工具链步骤记录
+    /**
+     * 工具链步骤记录。
+     *
+     * @param intent 步骤对应的工具意图
+     * @param parameters 步骤提取的参数
+     * @param tool 实际执行的工具实例
+     */
     public record ChainStep(String intent, Map<String, String> parameters, AgentTool tool) {}
 }

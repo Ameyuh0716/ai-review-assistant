@@ -15,7 +15,13 @@ import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-// 题目生成服务实现（Day 7）
+/**
+ * {@link QuizService} 的实现类。
+ * <p>
+ * 基于 Spring AI {@link ChatClient} 调用大模型生成题目，并通过本地正则解析与格式化逻辑，
+ * 将模型返回的非结构化文本转换为统一 Markdown 格式。支持缓存、同步生成、批量生成与流式生成。
+ * </p>
+ */
 @Slf4j
 @Service
 public class QuizServiceImpl implements QuizService {
@@ -23,6 +29,12 @@ public class QuizServiceImpl implements QuizService {
     private final ChatClient chatClient;
     private final PromptTemplate promptTemplate;
 
+    /**
+     * 构造题目生成服务。
+     *
+     * @param chatClient     Spring AI 聊天客户端，用于调用大模型
+     * @param promptTemplate 提示词模板渲染器，用于加载 quiz-system.txt / quiz-user.txt
+     */
     public QuizServiceImpl(ChatClient chatClient, PromptTemplate promptTemplate) {
         this.chatClient = chatClient;
         this.promptTemplate = promptTemplate;
@@ -55,6 +67,7 @@ public class QuizServiceImpl implements QuizService {
             .user(prompt)
             .stream()
             .content()
+            // 先聚合完整模型输出，再一次性格式化并返回，避免 SSE 流式传输破坏 Markdown 结构
             .collect(StringBuilder::new, StringBuilder::append)
             .flatMapMany(sb -> {
                 String formatted = formatQuizOutput(sb.toString(), topic);
@@ -64,6 +77,13 @@ public class QuizServiceImpl implements QuizService {
             });
     }
 
+    /**
+     * 构造用户提示词。
+     *
+     * @param topic 知识点主题
+     * @param count 题目数量
+     * @return 渲染后的用户提示词字符串
+     */
     private String buildQuizPrompt(String topic, int count) {
         return promptTemplate.render("quiz-user.txt", Map.of(
             "topic", topic,
@@ -73,7 +93,14 @@ public class QuizServiceImpl implements QuizService {
 
     /**
      * 将模型返回的任意格式题目内容，统一解析并格式化为规范 Markdown。
-     * 支持：【题目1】、题目1：、### 题目 1： 等多种变体，以及选项/答案挤在同一行的情况。
+     * <p>
+     * 支持多种题目标记变体（如 {@code 【题目1】}、{@code 题目1：}、{@code ### 题目 1：} 等），
+     * 并兼容选项/答案/解析挤在同一行的非标准输出。
+     * </p>
+     *
+     * @param raw   模型返回的原始文本
+     * @param topic 知识点主题
+     * @return 包含答案与解析的标准 Markdown 题目文本
      */
     public String formatQuizOutput(String raw, String topic) {
         return formatQuizOutput(raw, topic, false);
@@ -81,11 +108,23 @@ public class QuizServiceImpl implements QuizService {
 
     /**
      * 将模型返回的题目内容格式化为供对话展示的无答案 Markdown，隐藏答案与解析。
+     *
+     * @param raw   模型返回的原始文本
+     * @param topic 知识点主题
+     * @return 隐藏答案与解析后的 Markdown 题目文本
      */
     public String formatQuizOutputForChat(String raw, String topic) {
         return formatQuizOutput(raw, topic, true);
     }
 
+    /**
+     * 题目格式化的核心实现。
+     *
+     * @param raw        模型返回的原始文本
+     * @param topic      知识点主题
+     * @param hideAnswer 是否隐藏答案与解析（对话展示场景）
+     * @return 规范化后的 Markdown 题目文本
+     */
     private String formatQuizOutput(String raw, String topic, boolean hideAnswer) {
         if (raw == null || raw.trim().isEmpty()) {
             return raw;
@@ -151,12 +190,34 @@ public class QuizServiceImpl implements QuizService {
         return formatted;
     }
 
+    /**
+     * 按题目标记将模型输出拆分为独立题目块。
+     * <p>
+     * 支持如下标记变体：
+     * <ul>
+     *   <li>{@code ### 题目 1：}</li>
+     *   <li>{@code ###题目1：}</li>
+     *   <li>{@code 【题目1】}</li>
+     *   <li>{@code 题目1：}</li>
+     *   <li>{@code 题目 1：}</li>
+     * </ul>
+     * 若未识别到任何标记，则将整段文本视为一道题目。
+     * </p>
+     *
+     * @param body 去除引导语后的题目正文
+     * @return 拆分后的题目块列表
+     */
     private List<String> splitQuestions(String body) {
         List<String> blocks = new ArrayList<>();
-        // 匹配：### 题目 1： 或 ###题目1： 或 【题目1】 或 题目1： 或 题目 1：
+        // 正则说明：
+        // (?:---\s*)?       可选的前置分隔线
+        // (?:###\s*题目\s*\d+[：:])  匹配 "### 题目 1：" 及其空格变体
+        // |[【\[]题目\d+[】\]]      匹配 "【题目1】" 或 "[题目1]"
+        // |题目\s*\d+[：:]          匹配 "题目1：" 或 "题目 1："
         Pattern pattern = Pattern.compile("(?:---\\s*)?(?:###\\s*题目\\s*\\d+[：:]|[【\\[]题目\\d+[】\\]]|题目\\s*\\d+[：:])");
         Matcher matcher = pattern.matcher(body);
 
+        // 收集每个题目标记在原文中的起始位置
         List<Integer> starts = new ArrayList<>();
         while (matcher.find()) {
             starts.add(matcher.start());
@@ -169,6 +230,7 @@ public class QuizServiceImpl implements QuizService {
             return blocks;
         }
 
+        // 按相邻标记位置截取题目块
         for (int i = 0; i < starts.size(); i++) {
             int start = starts.get(i);
             int end = (i + 1 < starts.size()) ? starts.get(i + 1) : body.length();
@@ -178,18 +240,30 @@ public class QuizServiceImpl implements QuizService {
         return blocks;
     }
 
+    /**
+     * 解析单个题目块，提取题干、选项、答案、解析与学科名称。
+     * <p>
+     * 解析顺序：题目标记 → 答案 → 解析 → 选项 → 题干 → 学科名。
+     * 通过正则在模型非标准输出中尽量稳定地抽取结构化字段；若最终未识别到选项，则返回 {@code null}。
+     * </p>
+     *
+     * @param block         单个题目文本块
+     * @param defaultSubject 默认学科名称，通常为知识点 topic
+     * @return 解析后的题目对象；解析失败或无选项时返回 {@code null}
+     */
     private Question parseQuestion(String block, String defaultSubject) {
         // 去掉题目标记行（兼容 ### 题目 1： / 【题目1】 / 题目 1： 等）
         String content = block.replaceFirst("^(?:###\\s*)?题目\\s*\\d+[：:]", "")
                               .replaceFirst("^[【\\[]题目\\d+[】\\]]", "")
                               .trim();
 
-        // 提取答案
+        // 提取答案：匹配 "答案：A" 或 "**答案：A**" 等加粗变体，限定选项为 A-D
         String answer = "";
         Pattern answerPattern = Pattern.compile("(?:\\*\\*|\\s)*答案[：:]([A-Da-d])(?:\\*\\*|\\s)*");
         Matcher answerMatcher = answerPattern.matcher(content);
         if (answerMatcher.find()) {
             answer = answerMatcher.group(1).toUpperCase();
+            // 从内容中移除答案段落，避免干扰后续题干与选项提取
             content = content.substring(0, answerMatcher.start()) + content.substring(answerMatcher.end());
         }
 
@@ -202,7 +276,7 @@ public class QuizServiceImpl implements QuizService {
             content = content.substring(0, expMatcher.start()).trim();
         }
 
-        // 提取选项 A/B/C/D（支持 A. / A、 / A． 及同行挤在一起、跨行的情况）
+        // 提取选项 A/B/C/D：支持 A. / A、 / A． 及同行挤在一起、跨行的情况
         List<String> options = new ArrayList<>();
         Pattern optPattern = Pattern.compile("([A-Da-d])[.．、]\\s*(.*?)(?=(?:[A-Da-d][.．、])|(?:答案)|(?:解析)|$)", Pattern.DOTALL);
         Matcher optMatcher = optPattern.matcher(content);
@@ -223,7 +297,7 @@ public class QuizServiceImpl implements QuizService {
         if (firstOptStart >= 0) {
             questionText = content.substring(0, firstOptStart).trim();
         }
-        // 清理题干末尾可能的选项残留
+        // 清理题干末尾可能残留的单个选项标记
         questionText = questionText.replaceAll("[A-Da-d][.．、]\\s*$", "").trim();
 
         // 学科名称：优先用 defaultSubject；若题干首行是短标题则提取为学科
@@ -252,7 +326,7 @@ public class QuizServiceImpl implements QuizService {
                                    .replaceAll("\\s*\\n\\s*", " ")
                                    .trim();
 
-        // 解析拆成列表，清理 markdown 标记
+        // 解析拆成列表，清理 markdown 列表/加粗标记
         List<String> explanations = new ArrayList<>();
         if (!explanationText.isEmpty()) {
             String[] expLines = explanationText.split("\\r?\\n|(?=-[\\s-])");
@@ -268,11 +342,20 @@ public class QuizServiceImpl implements QuizService {
             explanations.add("略");
         }
 
-        // 如果没有选项，放弃解析
+        // 如果没有选项，说明模型输出不符合选择题格式，放弃解析
         if (options.isEmpty()) return null;
 
         return new Question(subject, questionText, options, answer, explanations);
     }
 
+    /**
+     * 题目结构化数据记录。
+     *
+     * @param subject      学科/知识点名称
+     * @param text         题干文本
+     * @param options      选项列表，每项形如 "A. xxx"
+     * @param answer       答案字母（大写），可能为空
+     * @param explanations 解析要点列表
+     */
     private record Question(String subject, String text, List<String> options, String answer, List<String> explanations) {}
 }

@@ -11,16 +11,42 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-// 错题本服务实现
+/**
+ * 错题本服务实现类。
+ * <p>
+ * 实现 {@link WrongAnswerBookService} 接口，提供错题记录、查询、掌握标记、删除及统计功能。
+ * 记录错题时会对同题未掌握的记录进行合并，仅增加错误次数，避免重复题目堆积。
+ * </p>
+ */
 @Service
 public class WrongAnswerBookServiceImpl extends ServiceImpl<WrongAnswerBookMapper, WrongAnswerBook>
         implements WrongAnswerBookService {
 
+    /**
+     * 记录一道错题。
+     * <p>
+     * 先去重查询该用户是否存在相同题目且未掌握的记录：
+     * <ul>
+     *   <li>存在：错误次数 +1，更新用户答案与最后错误时间；</li>
+     *   <li>不存在：新增一条错题记录，初始错误次数为 1。</li>
+     * </ul>
+     * </p>
+     *
+     * @param userId        用户 ID
+     * @param courseId      课程 ID
+     * @param question      题目内容
+     * @param options       选项内容
+     * @param correctAnswer 正确答案
+     * @param userAnswer    用户答案
+     * @param explanation   答案解析
+     * @param topic         知识点/主题
+     * @return 是否记录成功
+     */
     @Override
     public boolean recordWrong(Integer userId, Integer courseId, String question,
                                String options, String correctAnswer, String userAnswer,
                                String explanation, String topic) {
-        // 检查是否已有相同题目
+        // 查找该用户是否已有相同题目且未掌握的记录，避免重复录入
         WrongAnswerBook existing = lambdaQuery()
             .eq(WrongAnswerBook::getUserId, userId)
             .eq(WrongAnswerBook::getQuestion, question)
@@ -28,13 +54,14 @@ public class WrongAnswerBookServiceImpl extends ServiceImpl<WrongAnswerBookMappe
             .one();
 
         if (existing != null) {
-            // 已有未掌握的同题，增加错误次数
+            // 已存在未掌握记录，累加错误次数并更新最新作答信息
             existing.setWrongCount(existing.getWrongCount() + 1);
             existing.setUserAnswer(userAnswer);
             existing.setLastWrongAt(LocalDateTime.now());
             return updateById(existing);
         }
 
+        // 不存在则新增错题记录
         WrongAnswerBook book = new WrongAnswerBook();
         book.setUserId(userId);
         book.setCourseId(courseId);
@@ -52,19 +79,35 @@ public class WrongAnswerBookServiceImpl extends ServiceImpl<WrongAnswerBookMappe
         return save(book);
     }
 
+    /**
+     * 查询用户错题列表，支持按课程与掌握状态动态过滤，按最后错误时间倒序。
+     *
+     * @param userId   用户 ID
+     * @param courseId 课程 ID，可选
+     * @param mastered 掌握状态，可选
+     * @return 错题列表
+     */
     @Override
     public List<WrongAnswerBook> listWrong(Integer userId, Integer courseId, Boolean mastered) {
         var query = lambdaQuery()
             .eq(WrongAnswerBook::getUserId, userId);
+        // 动态追加课程过滤条件
         if (courseId != null) {
             query.eq(WrongAnswerBook::getCourseId, courseId);
         }
+        // 动态追加掌握状态过滤条件
         if (mastered != null) {
             query.eq(WrongAnswerBook::getIsMastered, mastered);
         }
         return query.orderByDesc(WrongAnswerBook::getLastWrongAt).list();
     }
 
+    /**
+     * 将指定 ID 的错题标记为已掌握。
+     *
+     * @param id 错题记录 ID
+     * @return 是否标记成功；记录不存在时返回 false
+     */
     @Override
     public boolean markMastered(Integer id) {
         WrongAnswerBook book = getById(id);
@@ -74,11 +117,27 @@ public class WrongAnswerBookServiceImpl extends ServiceImpl<WrongAnswerBookMappe
         return updateById(book);
     }
 
+    /**
+     * 删除指定 ID 的错题。
+     *
+     * @param id 错题记录 ID
+     * @return 是否删除成功
+     */
     @Override
     public boolean removeWrong(Integer id) {
         return removeById(id);
     }
 
+    /**
+     * 获取用户错题统计。
+     * <p>
+     * 统计结果包含 total（总数）、mastered（已掌握数）、unmastered（未掌握数）、
+     * masteryRate（掌握率，四舍五入到整数百分比）。
+     * </p>
+     *
+     * @param userId 用户 ID
+     * @return 错题统计映射
+     */
     @Override
     public Map<String, Object> getStats(Integer userId) {
         long total = lambdaQuery().eq(WrongAnswerBook::getUserId, userId).count();
@@ -90,6 +149,7 @@ public class WrongAnswerBookServiceImpl extends ServiceImpl<WrongAnswerBookMappe
         stats.put("total", total);
         stats.put("mastered", mastered);
         stats.put("unmastered", unmastered);
+        // 无错题时掌握率为 0，避免除零
         stats.put("masteryRate", total > 0 ? Math.round(mastered * 100.0 / total) : 0);
         return stats;
     }

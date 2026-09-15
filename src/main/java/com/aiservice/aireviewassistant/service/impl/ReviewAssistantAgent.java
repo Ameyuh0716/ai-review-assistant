@@ -28,23 +28,70 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-// Agent对话服务 - 意图识别+工具注册表+多轮记忆
+/**
+ * AI Review Assistant 的核心 Agent 编排类。
+ * <p>
+ * 作为 Agent 的统一入口，负责：
+ * <ul>
+ *     <li>意图识别：结合本地快速规则与 LLM 工具 Schema 推理，判断用户请求意图；</li>
+ *     <li>工具路由：根据识别到的意图从 {@link ToolRegistry} 选择并调用对应的 {@link AgentTool}；</li>
+ *     <li>执行模式：支持同步非流式 {@link #chat} 与流式 SSE {@link #chatStream} 两种输出方式；</li>
+ *     <li>消息持久化：保存用户消息、AI 回复、Agent 调用日志及复习记录；</li>
+ *     <li>特殊链路：识别“先…再…然后…”式的工具链请求，并自动保存生成的学习计划。</li>
+ * </ul>
+ */
 @Slf4j
 @Service
 public class ReviewAssistantAgent {
 
+    /** 工具注册表，维护意图到具体工具的映射。 */
     private final ToolRegistry toolRegistry;
+
+    /** Spring AI 聊天客户端，用于 LLM 意图识别。 */
     private final ChatClient chatClient;
+
+    /** 会话服务，负责会话的创建、查询与更新。 */
     private final ConversationService conversationService;
+
+    /** 消息服务，负责用户与助手消息的持久化。 */
     private final MessageService messageService;
+
+    /** Agent 调用日志服务，用于记录每次请求的意图、参数、耗时与成败。 */
     private final AgentLogService agentLogService;
+
+    /** 复习记录服务，将问答对沉淀到错题本/复习本。 */
     private final ReviewRecordsService reviewRecordsService;
+
+    /** Prompt 模板渲染器，用于构造意图识别等提示词。 */
     private final PromptTemplate promptTemplate;
+
+    /** Agent 指标收集器，统计工具调用、请求耗时、错误数等。 */
     private final AgentMetrics agentMetrics;
+
+    /** 工具链执行器，处理“先…再…然后…”式的连续工具调用请求。 */
     private final ChainExecutor chainExecutor;
+
+    /** JSON 序列化/反序列化工具，用于解析 LLM 返回的意图与记录参数。 */
     private final ObjectMapper objectMapper;
+
+    /** 学习计划服务，用于在生成学习计划后自动归档。 */
     private final StudyPlanService studyPlanService;
 
+    /**
+     * 构造核心 Agent，由 Spring 注入所有依赖组件。
+     *
+     * @param toolRegistry        工具注册表
+     * @param chatClient          Spring AI 聊天客户端
+     * @param conversationService 会话服务
+     * @param messageService      消息服务
+     * @param agentLogService     Agent 日志服务
+     * @param reviewRecordsService 复习记录服务
+     * @param promptTemplate      Prompt 模板渲染器
+     * @param agentMetrics        指标收集器
+     * @param chainExecutor       工具链执行器
+     * @param objectMapper        JSON 工具
+     * @param studyPlanService    学习计划服务
+     */
     public ReviewAssistantAgent(ToolRegistry toolRegistry, ChatClient chatClient,
                                 ConversationService conversationService, MessageService messageService,
                                 AgentLogService agentLogService, ReviewRecordsService reviewRecordsService,
@@ -64,11 +111,25 @@ public class ReviewAssistantAgent {
         this.studyPlanService = studyPlanService;
     }
 
-    // 意图识别结果
+    /**
+     * 意图识别结果内部记录。
+     *
+     * @param intent     识别到的意图标识，如 CHAT、QUIZ、PLAN 等
+     * @param parameters 从用户消息中提取的工具参数键值对
+     */
     private record IntentResult(String intent, Map<String, String> parameters) {}
 
-    // 动态构建意图识别 Prompt，传入最近历史消息以支持上下文消歧
+    /**
+     * 动态构建意图识别 Prompt。
+     * <p>
+     * 将当前工具 Schema、用户消息及最近历史消息注入模板，帮助 LLM 在上下文消歧后返回结构化意图。
+     *
+     * @param message 当前用户消息
+     * @param history 当前会话历史消息
+     * @return 渲染后的完整意图识别 Prompt
+     */
     private String buildIntentPrompt(String message, List<Message> history) {
+        // 把最近 5 条历史消息格式化为文本，作为 Prompt 的上下文部分
         String historyText = formatHistoryForIntent(history);
         return promptTemplate.render("intent-recognition.txt", Map.of(
             "toolSchemas", toolRegistry.buildToolSchemas(),
@@ -77,17 +138,26 @@ public class ReviewAssistantAgent {
         ));
     }
 
-    // 将最近历史消息格式化为意图识别 Prompt 可理解的文本
+    /**
+     * 将最近历史消息格式化为意图识别 Prompt 可理解的文本。
+     * <p>
+     * 仅取最近 5 条消息，保留角色、内容与历史意图，避免 Prompt 过长。
+     *
+     * @param history 当前会话历史消息列表
+     * @return 格式化后的历史消息文本；无历史时返回占位说明
+     */
     private String formatHistoryForIntent(List<Message> history) {
         if (history == null || history.isEmpty()) {
             return "（无历史消息）";
         }
         StringBuilder sb = new StringBuilder();
+        // 只保留最近 5 条，控制上下文长度与成本
         int start = Math.max(0, history.size() - 5);
         for (int i = start; i < history.size(); i++) {
             Message msg = history.get(i);
             String role = "user".equals(msg.getRole()) ? "用户" : "助手";
             sb.append(role).append("：").append(msg.getContent()).append("\n");
+            // 若历史消息带有意图标记，一并暴露给 LLM 做消歧参考
             if (msg.getIntent() != null && !msg.getIntent().isEmpty()) {
                 sb.append("（意图：").append(msg.getIntent()).append("）\n");
             }
@@ -95,12 +165,28 @@ public class ReviewAssistantAgent {
         return sb.toString();
     }
 
-    // Agent核心对话入口（普通模式）
+    /**
+     * Agent 核心对话入口（普通非流式模式）。
+     *
+     * @param userMessage    用户输入消息
+     * @param conversationId 会话 ID，可为 null（将自动创建新会话）
+     * @return 处理完成后展示给用户的文本响应
+     */
     public String chat(String userMessage, Integer conversationId) {
         return chat(userMessage, conversationId, null);
     }
 
-    // Agent核心对话入口（带用户身份）
+    /**
+     * Agent 核心对话入口（普通非流式模式，带用户身份）。
+     * <p>
+     * 完整执行链路：获取/创建会话 → 保存用户消息 → 加载历史 → 工具链检测 → 意图识别 →
+     * 工具选择与校验 → 执行 → 保存 AI 回复、复习记录与日志 → 返回展示文本。
+     *
+     * @param userMessage    用户输入消息
+     * @param conversationId 会话 ID，可为 null
+     * @param userId         用户 ID，可为 null（用于学习计划自动归档等场景）
+     * @return 展示给用户的文本响应；异常时返回友好错误提示
+     */
     public String chat(String userMessage, Integer conversationId, Integer userId) {
         long startTime = System.currentTimeMillis();
         String intent = null;
@@ -109,14 +195,14 @@ public class ReviewAssistantAgent {
         Conversation conversation = null;
         boolean success = false;
         try {
-            // 获取或创建会话
+            // 获取或创建会话，同时更新会话标题与最近活动时间
             conversation = getOrCreateConversation(conversationId, userMessage, userId);
             convId = conversation.getId();
 
-            // 保存用户消息
+            // 持久化用户原始消息，便于后续多轮记忆与审计
             saveMessage(convId, "user", userMessage, null);
 
-            // 加载历史消息并复用，减少重复查询
+            // 加载历史消息并复用，减少后续重复查询数据库
             List<Message> history = loadHistory(convId);
 
             // 检测是否为工具链请求（先...再...然后...）
@@ -186,27 +272,50 @@ public class ReviewAssistantAgent {
             return displayResponse;
         } catch (Exception e) {
             log.error("[Agent] 处理请求时发生错误: {}", e.getMessage(), e);
-            // 记录失败日志
+            // 记录失败日志，保留异常信息用于排查
             saveAgentLog(convId, userMessage, intent, params, startTime, false, e.getMessage());
             return "抱歉，处理您的请求时出现了错误，请稍后再试。如果问题持续，请尝试简化描述。";
         } finally {
+            // 无论成败都记录请求耗时与成功/失败指标
             long durationMs = System.currentTimeMillis() - startTime;
             agentMetrics.recordAgentRequest(intent, durationMs);
             agentMetrics.incrementAgentRequest(intent, success);
         }
     }
 
-    // 兼容旧入口：不带会话ID时自动创建新会话
+    /**
+     * 兼容旧入口：不带会话 ID 时自动创建新会话。
+     *
+     * @param userMessage 用户输入消息
+     * @return 展示给用户的文本响应
+     */
     public String chat(String userMessage) {
         return chat(userMessage, null);
     }
 
-    // Agent核心对话入口（流式模式）
+    /**
+     * Agent 核心对话入口（流式 SSE 模式）。
+     *
+     * @param userMessage    用户输入消息
+     * @param conversationId 会话 ID，可为 null
+     * @return 包含会话元数据与流式内容的 {@link Flux}
+     */
     public Flux<String> chatStream(String userMessage, Integer conversationId) {
         return chatStream(userMessage, conversationId, null);
     }
 
-    // Agent核心对话入口（流式模式，带用户身份）
+    /**
+     * Agent 核心对话入口（流式 SSE 模式，带用户身份）。
+     * <p>
+     * 执行链路与 {@link #chat(String, Integer, Integer)} 类似，但工具输出通过 {@link AgentTool#stream}
+     * 以流式方式返回。首帧会发送会话元数据，供前端绑定 conversationId；内容帧结束后在
+     * {@code doOnComplete} 中完成消息、复习记录、日志与学习计划的持久化。
+     *
+     * @param userMessage    用户输入消息
+     * @param conversationId 会话 ID，可为 null
+     * @param userId         用户 ID，可为 null
+     * @return 包含会话元数据与流式内容的 {@link Flux}
+     */
     public Flux<String> chatStream(String userMessage, Integer conversationId, Integer userId) {
         long startTime = System.currentTimeMillis();
         String intent = null;
@@ -217,7 +326,7 @@ public class ReviewAssistantAgent {
             conversation = getOrCreateConversation(conversationId, userMessage, userId);
             convId = conversation.getId();
 
-            // 保存用户消息
+            // 持久化用户原始消息
             saveMessage(convId, "user", userMessage, null);
 
             // 加载历史消息并复用
@@ -237,7 +346,7 @@ public class ReviewAssistantAgent {
                 return Flux.concat(metaFlux, Flux.just(chainResponse));
             }
 
-            // 意图识别
+            // 意图识别：复用统一入口
             IntentResult result = recognizeIntent(userMessage, convId, history);
             intent = result.intent();
             params = result.parameters();
@@ -246,7 +355,7 @@ public class ReviewAssistantAgent {
             log.debug("识别意图: {}", intent);
             log.debug("提取参数: {}", params);
 
-            // 从注册表获取工具并执行
+            // 从注册表获取工具；若意图未注册则回退到通用聊天工具
             AgentTool tool = toolRegistry.getTool(intent);
             if (tool == null) {
                 tool = toolRegistry.getTool("CHAT");
@@ -254,7 +363,7 @@ public class ReviewAssistantAgent {
 
             ToolContext context = new ToolContext(userMessage, convId, params, history);
 
-            // 工具参数校验
+            // 工具参数校验，失败时直接返回错误提示
             if (!tool.validate(context)) {
                 String error = tool.getValidationError(context);
                 return Flux.just(error != null ? error : "参数校验失败，请检查输入内容。");
@@ -263,10 +372,11 @@ public class ReviewAssistantAgent {
             log.debug("[Agent] 流式调用工具: {}", tool.getName());
             log.debug("================================");
 
+            // 获取工具流式输出
             Flux<String> responseFlux = tool.stream(context);
             agentMetrics.incrementToolCall(tool.getName());
 
-            // 收集流式内容并保存
+            // 收集流式内容并保存；使用 final 变量供 Lambda 内部使用
             StringBuilder contentBuffer = new StringBuilder();
             final String finalIntent = intent;
             final Integer finalConvId = convId;
@@ -277,10 +387,12 @@ public class ReviewAssistantAgent {
             final AgentTool finalTool = tool;
             final ToolContext finalContext = context;
             Flux<String> contentFlux = responseFlux
+                // 边收边拼，用于最终持久化完整回复
                 .doOnNext(contentBuffer::append)
                 .doOnComplete(() -> {
                     successFlag[0] = true;
                     String fullResponse = contentBuffer.toString();
+                    // 流式结束后一次性保存完整 AI 回复、复习记录与日志
                     saveMessage(finalConvId, "assistant", fullResponse, finalIntent);
                     saveReviewRecord(finalConvId, finalConversation != null ? finalConversation.getUserId() : null, userMessage, fullResponse);
                     saveAgentLog(finalConvId, userMessage, finalIntent, finalParams, startTime, true, null);
@@ -348,12 +460,27 @@ public class ReviewAssistantAgent {
         }
     }
 
-    // 兼容旧入口
+    /**
+     * 兼容旧入口：不带会话 ID 时自动创建新会话。
+     *
+     * @param userMessage 用户输入消息
+     * @return 包含会话元数据与流式内容的 {@link Flux}
+     */
     public Flux<String> chatStream(String userMessage) {
         return chatStream(userMessage, null);
     }
 
-    // 统一意图识别入口
+    /**
+     * 统一意图识别入口。
+     * <p>
+     * 当存在历史消息时，优先走 LLM 识别，避免上下文相关问句被本地规则误识别；
+     * 否则先尝试本地快速规则，无法命中再走 LLM。
+     *
+     * @param message        当前用户消息
+     * @param conversationId 当前会话 ID（目前主要用于日志，未参与识别逻辑）
+     * @param history        当前会话历史消息
+     * @return 识别结果，包含意图与参数
+     */
     private IntentResult recognizeIntent(String message, Integer conversationId, List<Message> history) {
         // 如果已有历史消息，优先走 LLM，避免上下文相关问句被本地规则误识别
         if (hasHistory(history)) {
@@ -362,7 +489,16 @@ public class ReviewAssistantAgent {
         return analyzeIntent(message, history);
     }
 
-    // 基于 LLM + 工具 Schema 的意图识别
+    /**
+     * 基于 LLM + 工具 Schema 的意图识别。
+     * <p>
+     * 通过 {@link ChatClient} 发送包含工具 Schema 与上下文的 Prompt，
+     * 从返回内容中提取 JSON 并解析意图与参数；若解析失败或意图不在注册表中则回退到关键词匹配。
+     *
+     * @param message 当前用户消息
+     * @param history 当前会话历史消息
+     * @return 识别到的意图与参数
+     */
     private IntentResult analyzeIntentWithLlm(String message, List<Message> history) {
         try {
             String response = chatClient.prompt()
@@ -371,6 +507,7 @@ public class ReviewAssistantAgent {
                 .call()
                 .content();
 
+            // 提取 JSON 字符串并解析
             String json = extractJson(response);
             JsonNode root = objectMapper.readTree(json);
 
@@ -383,7 +520,7 @@ public class ReviewAssistantAgent {
                 });
             }
 
-            // 简单校验，不在列表则回退
+            // 简单校验：若识别到的意图未在注册表中，则回退到关键词兜底
             AgentTool tool = toolRegistry.getTool(intent);
             if (tool == null) {
                 return fallbackIntent(message);
@@ -395,7 +532,15 @@ public class ReviewAssistantAgent {
         }
     }
 
-    // 从 LLM 响应中提取 JSON（兼容被代码块包裹的情况）
+    /**
+     * 从 LLM 响应中提取 JSON 文本。
+     * <p>
+     * 兼容 LLM 把 JSON 包裹在代码块（```json ... ```）中的情况；
+     * 若无法定位花括号，则返回原内容或空对象字符串。
+     *
+     * @param response LLM 原始响应内容
+     * @return 提取出的 JSON 字符串
+     */
     private String extractJson(String response) {
         if (response == null || response.isEmpty()) {
             return "{}";
@@ -409,7 +554,16 @@ public class ReviewAssistantAgent {
         return trimmed;
     }
 
-    // 双层意图识别入口：先本地规则，复杂语义再走 LLM
+    /**
+     * 双层意图识别入口：先本地规则，复杂语义再走 LLM。
+     * <p>
+     * 本地规则命中时可直接返回结果，降低延迟与 LLM 调用成本；
+     * 未命中时委托给 {@link #analyzeIntentWithLlm}。
+     *
+     * @param message 当前用户消息
+     * @param history 当前会话历史消息
+     * @return 识别结果
+     */
     private IntentResult analyzeIntent(String message, List<Message> history) {
         IntentResult fastResult = analyzeIntentFast(message);
         if (fastResult != null) {
@@ -419,14 +573,22 @@ public class ReviewAssistantAgent {
         return analyzeIntentWithLlm(message, history);
     }
 
-    // 本地快速规则：常见且结构清晰的关键词直接命中，跳过 LLM 以降低延迟
+    /**
+     * 本地快速意图识别规则。
+     * <p>
+     * 对常见且结构清晰的关键词直接命中，跳过 LLM 以降低延迟与成本；
+     * 按“出题 > 计划 > 总结 > 解释 > 问题 > 问候”的优先级匹配，无法命中时返回 null。
+     *
+     * @param message 当前用户消息
+     * @return 本地规则命中结果；未命中返回 null
+     */
     private IntentResult analyzeIntentFast(String message) {
-        // 1. 出题意图
+        // 1. 出题意图：题目/练习/测试/出题/面试题/考题
         if (containsQuizKeyword(message)) {
             return new IntentResult("QUIZ", Map.of());
         }
 
-        // 2. 复习计划意图
+        // 2. 复习计划意图：计划/安排/复习计划/规划
         if (containsPlanKeyword(message)) {
             return new IntentResult("PLAN", Map.of());
         }
@@ -455,43 +617,81 @@ public class ReviewAssistantAgent {
         return null;
     }
 
-    // 判断是否包含总结关键词
+    /**
+     * 判断用户消息是否包含总结类关键词。
+     *
+     * @param message 用户输入消息
+     * @return 包含“总结/归纳/概括”等词时返回 true
+     */
     private boolean containsSummaryKeyword(String message) {
         return message.contains("总结") || message.contains("归纳") || message.contains("概括");
     }
 
-    // 判断是否包含解释关键词
+    /**
+     * 判断用户消息是否包含解释类关键词。
+     *
+     * @param message 用户输入消息
+     * @return 包含“解释/什么意思/含义/区别/对比”等词时返回 true
+     */
     private boolean containsExplainKeyword(String message) {
         return message.contains("解释") || message.contains("什么意思") || message.contains("含义")
             || message.contains("区别") || message.contains("对比");
     }
 
-    // 判断是否包含出题关键词
+    /**
+     * 判断用户消息是否包含出题/练习类关键词。
+     *
+     * @param message 用户输入消息
+     * @return 包含“题目/练习/测试/出题/面试题/考题”等词时返回 true
+     */
     private boolean containsQuizKeyword(String message) {
         return message.contains("题目") || message.contains("练习") || message.contains("测试")
             || message.contains("出题") || message.contains("面试题") || message.contains("考题");
     }
 
-    // 判断是否包含计划关键词
+    /**
+     * 判断用户消息是否包含学习计划/安排类关键词。
+     *
+     * @param message 用户输入消息
+     * @return 包含“计划/安排/复习计划/规划”等词时返回 true
+     */
     private boolean containsPlanKeyword(String message) {
         return message.contains("计划") || message.contains("安排") || message.contains("复习计划")
             || message.contains("规划");
     }
 
-    // 判断是否包含疑问关键词
+    /**
+     * 判断用户消息是否包含疑问类关键词或问号。
+     *
+     * @param message 用户输入消息
+     * @return 包含常见疑问词或中英文问号时返回 true
+     */
     private boolean containsQuestionKeyword(String message) {
         return message.contains("?") || message.contains("？") || message.contains("什么")
             || message.contains("怎么") || message.contains("如何") || message.contains("为什么")
             || message.contains("哪些") || message.contains("吗");
     }
 
-    // 判断是否常见问候
+    /**
+     * 判断用户消息是否为常见问候语。
+     *
+     * @param message 用户输入消息
+     * @return 以“你好/您好/hello/hi/hey/在吗/在嘛”开头时返回 true
+     */
     private boolean isGreeting(String message) {
         String lower = message.toLowerCase();
         return lower.matches("^(你好|您好|hello|hi|hey|在吗|在嘛).*");
     }
 
-    // LLM 失败时的关键词回退
+    /**
+     * LLM 意图识别失败时的关键词兜底回退。
+     * <p>
+     * 当 {@link #analyzeIntentWithLlm} 抛出异常或返回未注册意图时，按关键词优先级返回保守意图，
+     * 确保用户请求至少能被通用聊天或已知工具处理。
+     *
+     * @param message 用户输入消息
+     * @return 兜底识别结果，意图不会为 null
+     */
     private IntentResult fallbackIntent(String message) {
         String intent;
         if (message.contains("题目") || message.contains("练习") || message.contains("测试") || message.contains("出题")) {
@@ -511,7 +711,18 @@ public class ReviewAssistantAgent {
         return new IntentResult(intent, Map.of());
     }
 
-    // 获取或创建会话（支持用户身份）
+    /**
+     * 获取已有会话或创建新会话。
+     * <p>
+     * 若传入有效的 conversationId，则校验存在性并更新最近活动时间；
+     * 若标题仍为占位符（“新对话”或空），则使用当前用户消息前 30 字重命名。
+     * 未传入或不存在时，新建会话并持久化。
+     *
+     * @param conversationId 会话 ID，可为 null
+     * @param userMessage    当前用户消息，用于生成会话标题
+     * @param userId         用户 ID，可为 null；为 null 时记为 anonymous
+     * @return 获取或创建后的会话对象
+     */
     private Conversation getOrCreateConversation(Integer conversationId, String userMessage, Integer userId) {
         if (conversationId != null) {
             Conversation exist = conversationService.getById(conversationId);
@@ -521,13 +732,13 @@ public class ReviewAssistantAgent {
                     String title = userMessage.length() > 30 ? userMessage.substring(0, 30) + "..." : userMessage;
                     exist.setTitle(title);
                 }
-                // 更新会话时间
+                // 更新会话最近活动时间，保证会话列表排序准确
                 exist.setUpdatedAt(LocalDateTime.now());
                 conversationService.updateById(exist);
                 return exist;
             }
         }
-        // 创建新会话，标题取用户消息前30字
+        // 创建新会话，标题取用户消息前 30 字，超出部分用省略号
         Conversation conversation = new Conversation();
         String title = userMessage.length() > 30 ? userMessage.substring(0, 30) + "..." : userMessage;
         conversation.setTitle(title);
@@ -536,7 +747,17 @@ public class ReviewAssistantAgent {
         return conversation;
     }
 
-    // 保存消息
+    /**
+     * 保存单条聊天消息。
+     * <p>
+     * 对 AI 回复会记录识别到的意图，便于后续审计与多轮上下文追踪。
+     * 保存失败仅记录 warn，不影响主流程返回。
+     *
+     * @param conversationId 所属会话 ID
+     * @param role           消息角色：user / assistant
+     * @param content        消息内容
+     * @param intent         消息对应的意图，用户消息可为 null
+     */
     private void saveMessage(Integer conversationId, String role, String content, String intent) {
         try {
             Message message = new Message();
@@ -550,7 +771,20 @@ public class ReviewAssistantAgent {
         }
     }
 
-    // 保存Agent调用日志
+    /**
+     * 保存 Agent 调用日志。
+     * <p>
+     * 记录用户原始消息、识别意图、提取参数、请求耗时、执行成败及异常信息，
+     * 用于后续监控、排错与效果评估。保存失败仅记录 warn，不影响主流程。
+     *
+     * @param conversationId 所属会话 ID
+     * @param userMessage    用户原始消息
+     * @param intent         识别意图
+     * @param params         工具参数
+     * @param startTime      请求开始时间戳（毫秒）
+     * @param success        是否执行成功
+     * @param errorMsg       错误信息，成功时可为 null
+     */
     private void saveAgentLog(Integer conversationId, String userMessage, String intent,
                               Map<String, String> params, long startTime, boolean success, String errorMsg) {
         try {
@@ -569,7 +803,16 @@ public class ReviewAssistantAgent {
         }
     }
 
-    // 保存复习记录
+    /**
+     * 将问答对沉淀到复习记录（错题本/复习本）。
+     * <p>
+     * 保存失败仅记录 warn，避免影响主响应流程。
+     *
+     * @param conversationId 所属会话 ID
+     * @param userId         用户 ID
+     * @param question       问题/用户消息
+     * @param answer         AI 生成的答案
+     */
     private void saveReviewRecord(Integer conversationId, String userId, String question, String answer) {
         try {
             reviewRecordsService.saveFromAgent(conversationId, userId, question, answer);
@@ -578,7 +821,14 @@ public class ReviewAssistantAgent {
         }
     }
 
-    // 加载历史消息（最近10条）
+    /**
+     * 加载当前会话最近 10 条历史消息。
+     * <p>
+     * 按创建时间升序排列，控制数量为 10 条，既保留足够上下文又避免 Prompt 过长。
+     *
+     * @param conversationId 会话 ID
+     * @return 历史消息列表；无历史时返回空列表
+     */
     private List<Message> loadHistory(Integer conversationId) {
         return messageService.lambdaQuery()
             .eq(Message::getConversationId, conversationId)
@@ -587,7 +837,12 @@ public class ReviewAssistantAgent {
             .list();
     }
 
-    // 判断已加载的历史消息是否非空
+    /**
+     * 判断已加载的历史消息是否非空。
+     *
+     * @param history 历史消息列表
+     * @return 列表不为 null 且至少包含一条消息时返回 true
+     */
     private boolean hasHistory(List<Message> history) {
         return history != null && !history.isEmpty();
     }

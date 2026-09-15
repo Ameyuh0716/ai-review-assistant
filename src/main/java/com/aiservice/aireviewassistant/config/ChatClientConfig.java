@@ -12,20 +12,44 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 
-// ChatClient 统一配置：根据 ai.model.* 配置构建主 ChatClient，支持 dashscope / openai / ollama
+/**
+ * ChatClient 统一配置类。
+ * <p>根据 {@code ai.model.*} 配置构建主 {@link ChatClient}，支持 dashscope、openai、ollama 三种供应商。
+ * 通过 {@link Primary} 标记，确保该 Bean 作为默认 ChatClient 被注入。</p>
+ */
 @Configuration
 public class ChatClientConfig {
 
     private final ModelProperties modelProperties;
 
+    /**
+     * 构造 ChatClient 配置类。
+     *
+     * @param modelProperties AI 模型配置属性
+     */
     public ChatClientConfig(ModelProperties modelProperties) {
         this.modelProperties = modelProperties;
     }
 
+    /**
+     * 注册主 {@link ChatClient} Bean。
+     * <p>根据 {@link ModelProperties#getProvider()} 的值选择对应的构建方式：
+     * <ul>
+     *   <li>dashscope：使用 Spring AI Alibaba 自动注入的 Builder</li>
+     *   <li>openai：手动创建 {@code OpenAiApi} 与 {@code OpenAiChatModel}</li>
+     *   <li>ollama：手动创建 {@code OllamaApi} 与 {@code OllamaChatModel}</li>
+     * </ul>
+     * 若配置了不支持的供应商，则抛出异常。</p>
+     *
+     * @param builder Spring AI 自动注入的 ChatClient.Builder
+     * @return 配置完成的 ChatClient 实例
+     * @throws IllegalArgumentException 当供应商不是 dashscope/openai/ollama 时抛出
+     */
     @Bean
     @Primary
     public ChatClient chatClient(ChatClient.Builder builder) {
         String provider = modelProperties.getProvider().toLowerCase();
+        // 根据模型供应商选择对应的 ChatClient 构建策略
         return switch (provider) {
             case "dashscope" -> buildDashScopeClient(builder);
             case "openai" -> buildOpenAiClient();
@@ -35,7 +59,14 @@ public class ChatClientConfig {
         };
     }
 
-    // DashScope：使用 Spring AI Alibaba 自动注入的 Builder
+    /**
+     * 构建 DashScope（通义千问）ChatClient。
+     * <p>直接使用 Spring AI Alibaba 自动注入的 {@link ChatClient.Builder}，
+     * 并设置模型名称与温度参数。</p>
+     *
+     * @param builder 自动注入的 ChatClient.Builder
+     * @return DashScope ChatClient 实例
+     */
     private ChatClient buildDashScopeClient(ChatClient.Builder builder) {
         return builder
             .defaultOptions(ChatOptions.builder()
@@ -45,13 +76,21 @@ public class ChatClientConfig {
             .build();
     }
 
-    // OpenAI：手动创建 ChatModel 和 ChatClient
+    /**
+     * 构建 OpenAI ChatClient。
+     * <p>手动创建 {@code OpenAiApi} 与 {@code OpenAiChatModel}；若未配置 API Key 则抛出异常。
+     * 当配置了 {@code ai.model.base-url} 时，会将其设置为自定义基础 URL（可用于代理）。</p>
+     *
+     * @return OpenAI ChatClient 实例
+     * @throws IllegalArgumentException 当未配置 api-key 时抛出
+     */
     private ChatClient buildOpenAiClient() {
         if (modelProperties.getApiKey() == null || modelProperties.getApiKey().isEmpty()) {
             throw new IllegalArgumentException("OpenAI 模型需要配置 ai.model.api-key");
         }
         OpenAiApi.Builder apiBuilder = OpenAiApi.builder()
             .apiKey(modelProperties.getApiKey());
+        // 仅当显式配置了 base-url 时才覆盖默认端点
         String baseUrl = modelProperties.getBaseUrl();
         if (baseUrl != null && !baseUrl.isEmpty()) {
             apiBuilder.baseUrl(baseUrl);
@@ -67,8 +106,16 @@ public class ChatClientConfig {
         return ChatClient.builder(chatModel).build();
     }
 
-    // Ollama：手动创建 ChatModel 和 ChatClient
+    /**
+     * 构建 Ollama ChatClient。
+     * <p>手动创建 {@code OllamaApi} 与 {@code OllamaChatModel}；
+     * 若未配置 {@code ai.model.base-url}，则默认使用本地 Ollama 地址
+     * {@code http://localhost:11434}。</p>
+     *
+     * @return Ollama ChatClient 实例
+     */
     private ChatClient buildOllamaClient() {
+        // 未配置 base-url 时回退到本地 Ollama 默认端口
         String baseUrl = modelProperties.getBaseUrl();
         if (baseUrl == null || baseUrl.isEmpty()) {
             baseUrl = "http://localhost:11434";

@@ -6,10 +6,18 @@ import io.swagger.v3.oas.models.info.Contact;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-// OpenAPI 文档配置
+/**
+ * OpenAPI / Swagger 文档配置类。
+ * <p>注册 {@link OpenAPI} Bean，提供 API 基础信息（标题、描述、版本、联系人）。</p>
+ */
 @Configuration
 public class OpenApiConfig {
 
+    /**
+     * 注册 OpenAPI 文档 Bean。
+     *
+     * @return 配置完成的 OpenAPI 实例
+     */
     @Bean
     public OpenAPI openAPI() {
         return new OpenAPI()

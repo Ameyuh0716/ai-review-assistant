@@ -12,17 +12,42 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 
-// Spring Security 配置：JWT 认证 + 接口权限控制
+/**
+ * Spring Security 安全配置类。
+ * <p>配置 JWT 无状态认证、接口权限控制、密码加密器以及禁用 Session 和 CSRF。</p>
+ */
 @Configuration
 @EnableWebSecurity
 public class SecurityConfig {
 
     private final JwtProperties jwtProperties;
 
+    /**
+     * 构造安全配置类。
+     *
+     * @param jwtProperties JWT 配置属性，用于构建认证过滤器
+     */
     public SecurityConfig(JwtProperties jwtProperties) {
         this.jwtProperties = jwtProperties;
     }
 
+    /**
+     * 配置 {@link SecurityFilterChain}。
+     * <p>规则说明：
+     * <ul>
+     *   <li>禁用 CSRF（前后端分离 / JWT 无状态场景）</li>
+     *   <li>Session 策略设置为 STATELESS</li>
+     *   <li>在 UsernamePasswordAuthenticationFilter 之前添加 JWT 认证过滤器</li>
+     *   <li>公开静态资源、认证接口、Swagger、Actuator 健康检查</li>
+     *   <li>Actuator 其他端点需要 ADMIN 角色</li>
+     *   <li>Agent 与对话接口允许匿名访问（登录后自动关联用户）</li>
+     *   <li>其余请求均需认证</li>
+     * </ul></p>
+     *
+     * @param http Spring Security 配置构建器
+     * @return 构建好的 SecurityFilterChain
+     * @throws Exception 配置异常
+     */
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         http
@@ -48,6 +73,12 @@ public class SecurityConfig {
         return http.build();
     }
 
+    /**
+     * 注册密码编码器 Bean。
+     * <p>使用 BCrypt 强哈希算法对用户密码进行加密与校验。</p>
+     *
+     * @return BCryptPasswordEncoder 实例
+     */
     @Bean
     public PasswordEncoder passwordEncoder() {
         return new BCryptPasswordEncoder();

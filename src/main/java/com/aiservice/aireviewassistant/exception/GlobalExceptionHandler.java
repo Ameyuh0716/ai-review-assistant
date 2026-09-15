@@ -16,13 +16,27 @@ import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.stream.Collectors;
 
-// 全局异常处理：统一捕获并包装为 ApiResponse
+/**
+ * 全局异常处理器。
+ * <p>
+ * 统一捕获 Controller 层抛出的各类异常，按异常类型映射为对应的 HTTP 状态码与业务提示，
+ * 最终包装为 {@link ApiResponse} 返回，避免直接将堆栈信息暴露给客户端。
+ * </p>
+ */
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
 
-    // 处理参数校验失败（@Valid / @NotBlank 等）
+    /**
+     * 处理 {@code @Valid} / {@code @RequestBody} 参数校验失败。
+     * <p>
+     * 提取第一个字段错误作为提示，返回 400 Bad Request。
+     * </p>
+     *
+     * @param e {@link MethodArgumentNotValidException}
+     * @return 包含字段错误信息的失败响应
+     */
     @ExceptionHandler(MethodArgumentNotValidException.class)
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     public ApiResponse<Void> handleMethodArgumentNotValid(MethodArgumentNotValidException e) {
@@ -34,7 +48,12 @@ public class GlobalExceptionHandler {
         return ApiResponse.error(400, message);
     }
 
-    // 处理 @Validated 方法参数校验失败（@RequestParam / @PathVariable）
+    /**
+     * 处理 {@code @Validated} 方法参数校验失败（如 {@code @RequestParam} / {@code @PathVariable}）。
+     *
+     * @param e {@link ConstraintViolationException}
+     * @return 包含所有校验错误信息的失败响应
+     */
     @ExceptionHandler(ConstraintViolationException.class)
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     public ApiResponse<Void> handleConstraintViolation(ConstraintViolationException e) {
@@ -45,7 +64,12 @@ public class GlobalExceptionHandler {
         return ApiResponse.error(400, message);
     }
 
-    // 处理 BindException（GET 请求参数绑定失败）
+    /**
+     * 处理 GET 请求参数绑定失败（如类型转换错误）。
+     *
+     * @param e {@link BindException}
+     * @return 包含字段错误信息的失败响应
+     */
     @ExceptionHandler(BindException.class)
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     public ApiResponse<Void> handleBindException(BindException e) {
@@ -57,7 +81,12 @@ public class GlobalExceptionHandler {
         return ApiResponse.error(400, message);
     }
 
-    // 处理业务异常
+    /**
+     * 处理业务异常。
+     *
+     * @param e {@link BusinessException}
+     * @return 使用业务异常自身 code 与 message 的失败响应
+     */
     @ExceptionHandler(BusinessException.class)
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     public ApiResponse<Void> handleBusinessException(BusinessException e) {
@@ -65,21 +94,40 @@ public class GlobalExceptionHandler {
         return ApiResponse.error(e.getCode(), e.getMessage());
     }
 
-    // 处理权限不足
+    /**
+     * 处理权限不足异常。
+     *
+     * @param e {@link AccessDeniedException}
+     * @return 403 无权访问响应
+     */
     @ExceptionHandler(AccessDeniedException.class)
     @ResponseStatus(HttpStatus.FORBIDDEN)
     public ApiResponse<Void> handleAccessDenied(AccessDeniedException e) {
         return ApiResponse.error(403, "无权访问，请先登录");
     }
 
-    // 处理限流（429 Too Many Requests）
+    /**
+     * 处理限流异常。
+     *
+     * @param e {@link TooManyRequestsException}
+     * @return 429 请求过于频繁的响应
+     */
     @ExceptionHandler(TooManyRequestsException.class)
     @ResponseStatus(HttpStatus.TOO_MANY_REQUESTS)
     public ApiResponse<Void> handleTooManyRequests(TooManyRequestsException e) {
         return ApiResponse.error(429, e.getMessage());
     }
 
-    // 处理静态资源 / 页面未找到（404 而非 500）
+    /**
+     * 处理静态资源 / 页面未找到异常。
+     * <p>
+     * Spring Boot 3.2 将静态资源缺失包装为 {@link NoResourceFoundException}，
+     * 此处单独捕获避免返回 500。
+     * </p>
+     *
+     * @param e {@link NoResourceFoundException}
+     * @return 404 资源不存在响应
+     */
     @ExceptionHandler(NoResourceFoundException.class)
     @ResponseStatus(HttpStatus.NOT_FOUND)
     public ApiResponse<Void> handleNoResourceFound(NoResourceFoundException e) {
@@ -87,7 +135,15 @@ public class GlobalExceptionHandler {
         return ApiResponse.error(404, "请求的资源不存在");
     }
 
-    // 处理限流等运行时异常（不泄露内部信息）
+    /**
+     * 处理运行时异常。
+     * <p>
+     * 兜底捕获非受检异常，仅记录服务端日志，向前端返回通用提示，防止泄露内部细节。
+     * </p>
+     *
+     * @param e {@link RuntimeException}
+     * @return 500 系统繁忙响应
+     */
     @ExceptionHandler(RuntimeException.class)
     @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
     public ApiResponse<Void> handleRuntimeException(RuntimeException e) {
@@ -95,7 +151,15 @@ public class GlobalExceptionHandler {
         return ApiResponse.error(500, "系统繁忙，请稍后再试");
     }
 
-    // 兜底异常处理
+    /**
+     * 最终兜底异常处理。
+     * <p>
+     * 捕获所有未被上述处理器处理的受检异常，返回通用 500 提示。
+     * </p>
+     *
+     * @param e {@link Exception}
+     * @return 500 系统繁忙响应
+     */
     @ExceptionHandler(Exception.class)
     @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
     public ApiResponse<Void> handleException(Exception e) {
