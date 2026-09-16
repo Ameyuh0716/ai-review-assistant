@@ -15,7 +15,7 @@ import java.util.List;
  */
 @Tag(name = "课程管理", description = "课程的增删改查，数据按用户隔离")
 @RestController
-@RequestMapping("/courses")
+@RequestMapping("/api/courses")
 public class CoursesController {
 
     private final CoursesService coursesService;

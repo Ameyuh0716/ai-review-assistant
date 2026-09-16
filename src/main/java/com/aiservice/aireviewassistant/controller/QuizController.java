@@ -3,6 +3,8 @@ package com.aiservice.aireviewassistant.controller;
 import com.aiservice.aireviewassistant.common.ApiResponse;
 import com.aiservice.aireviewassistant.dto.QuizGradingResult;
 import com.aiservice.aireviewassistant.dto.QuizSubmitRequest;
+import com.aiservice.aireviewassistant.entity.Courses;
+import com.aiservice.aireviewassistant.service.CoursesService;
 import com.aiservice.aireviewassistant.service.QuizService;
 import com.aiservice.aireviewassistant.service.WrongAnswerBookService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -10,11 +12,13 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 练习题控制器。
@@ -29,16 +33,20 @@ public class QuizController {
 
     private final QuizService quizService;
     private final WrongAnswerBookService wrongAnswerBookService;
+    private final CoursesService coursesService;
 
     /**
-     * 构造方法，注入题目生成服务与错题本服务。
+     * 构造方法，注入题目生成服务、错题本服务与课程服务。
      *
      * @param quizService            题目生成服务
      * @param wrongAnswerBookService 错题本服务，用于记录答错的题目
+     * @param coursesService         课程查询服务
      */
-    public QuizController(QuizService quizService, WrongAnswerBookService wrongAnswerBookService) {
+    public QuizController(QuizService quizService, WrongAnswerBookService wrongAnswerBookService,
+                          CoursesService coursesService) {
         this.quizService = quizService;
         this.wrongAnswerBookService = wrongAnswerBookService;
+        this.coursesService = coursesService;
     }
 
     /**
@@ -50,24 +58,44 @@ public class QuizController {
      */
     @Operation(summary = "生成一道练习题")
     @PostMapping
-    public String generateQuiz(@RequestParam("topic") @NotBlank(message = "知识点不能为空") String topic) {
-        return quizService.generateQuiz(topic);
+    public ApiResponse<String> generateQuiz(
+            @RequestParam("topic") @NotBlank(message = "知识点不能为空") String topic) {
+        return ApiResponse.success(quizService.generateQuiz(topic));
     }
 
     /**
-     * 根据知识点生成多道练习题。
-     * <p>HTTP: {@code POST /api/quiz/generate?topic=xxx&count=5}</p>
+     * 根据课程与知识点生成多道练习题。
+     * <p>HTTP: {@code POST /api/quiz/generate}</p>
+     * <p>请求体：{@code {"courseId": 1, "topic": "进程同步", "count": 5}}</p>
      *
-     * @param topic 知识点描述，不能为空
-     * @param count 生成题目数量，默认 1，取值范围 1-10
+     * @param body 包含 courseId、topic、count 的 JSON 请求体
      * @return 生成的多道题目文本
      */
     @Operation(summary = "生成多道练习题")
     @PostMapping("/generate")
-    public String generateMultipleQuiz(
-            @RequestParam("topic") @NotBlank(message = "知识点不能为空") String topic,
-            @RequestParam(value = "count", defaultValue = "1") @Min(1) @Max(10) int count) {
-        return quizService.generateQuiz(topic, count);
+    public ApiResponse<String> generateMultipleQuiz(@RequestBody Map<String, Object> body) {
+        Object courseIdObj = body.get("courseId");
+        if (courseIdObj == null) {
+            return ApiResponse.error(400, "课程ID不能为空");
+        }
+        Integer courseId = Integer.valueOf(String.valueOf(courseIdObj));
+        Courses course = coursesService.getById(courseId);
+        if (course == null) {
+            return ApiResponse.error(404, "课程不存在");
+        }
+        Object topicObj = body.get("topic");
+        String topic = topicObj != null ? String.valueOf(topicObj) : course.getName();
+        int count = 1;
+        Object countObj = body.get("count");
+        if (countObj != null) {
+            try {
+                count = Integer.parseInt(String.valueOf(countObj));
+            } catch (NumberFormatException ignored) {
+                // 非法数量使用默认值 1
+            }
+        }
+        count = Math.max(1, Math.min(count, 10));
+        return ApiResponse.success(quizService.generateQuiz(topic, count));
     }
 
     /**

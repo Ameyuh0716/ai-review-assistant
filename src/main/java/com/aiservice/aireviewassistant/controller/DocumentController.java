@@ -1,11 +1,15 @@
 package com.aiservice.aireviewassistant.controller;
 
+import com.aiservice.aireviewassistant.common.ApiResponse;
 import com.aiservice.aireviewassistant.service.DocumentService;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * 文档控制器。
@@ -38,14 +42,18 @@ public class DocumentController {
      * @return 处理结果提示文本
      */
     @PostMapping("/upload")
-    public String uploadDocument(
+    public ApiResponse<Map<String, Object>> uploadDocument(
             @RequestParam("courseId") @NotNull(message = "课程ID不能为空") Integer courseId,
             @RequestParam("file") MultipartFile file) {
         // 前置校验：文件为空时直接返回错误提示，避免进入后续处理
         if (file == null || file.isEmpty()) {
-            return "错误：请选择要上传的文件";
+            return ApiResponse.error(400, "请选择要上传的文件");
         }
-        return documentService.uploadAndVectorize(courseId, file);
+        String message = documentService.uploadAndVectorize(courseId, file);
+        Map<String, Object> result = new HashMap<>();
+        result.put("message", message);
+        result.put("courseId", courseId);
+        return ApiResponse.success(result);
     }
 
     /**
@@ -58,9 +66,13 @@ public class DocumentController {
      * @return 处理结果提示文本
      */
     @PostMapping("/import")
-    public String importContent(
+    public ApiResponse<Map<String, Object>> importContent(
             @RequestParam("courseId") @NotNull(message = "课程ID不能为空") Integer courseId,
             @RequestBody @NotBlank(message = "内容不能为空") String content) {
-        return documentService.importContent(courseId, content);
+        String message = documentService.importContent(courseId, content);
+        Map<String, Object> result = new HashMap<>();
+        result.put("message", message);
+        result.put("courseId", courseId);
+        return ApiResponse.success(result);
     }
 }

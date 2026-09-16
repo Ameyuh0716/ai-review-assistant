@@ -1,5 +1,6 @@
 package com.aiservice.aireviewassistant.controller;
 
+import com.aiservice.aireviewassistant.common.ApiResponse;
 import com.aiservice.aireviewassistant.entity.Conversation;
 import com.aiservice.aireviewassistant.service.ConversationLifecycleService;
 import com.aiservice.aireviewassistant.service.ConversationService;
@@ -47,14 +48,14 @@ public class ConversationController {
      */
     @Operation(summary = "创建新会话")
     @PostMapping
-    public Conversation create(@RequestBody Conversation conversation,
+    public ApiResponse<Conversation> create(@RequestBody Conversation conversation,
                                @RequestAttribute(required = false) Integer currentUserId) {
         // 权限校验与归属设置：未登录用户创建匿名会话，已登录用户关联到当前用户
         if (currentUserId != null) {
             conversation.setUserId(String.valueOf(currentUserId));
         }
         conversationService.save(conversation);
-        return conversation;
+        return ApiResponse.success(conversation);
     }
 
     /**
@@ -67,7 +68,7 @@ public class ConversationController {
      */
     @Operation(summary = "查询会话列表")
     @GetMapping
-    public List<Conversation> list(@RequestAttribute(required = false) Integer currentUserId) {
+    public ApiResponse<List<Conversation>> list(@RequestAttribute(required = false) Integer currentUserId) {
         QueryWrapper<Conversation> wrapper = new QueryWrapper<>();
         // 按最后更新时间倒序，确保最新会话在前
         wrapper.orderByDesc("updated_at");
@@ -75,7 +76,7 @@ public class ConversationController {
         if (currentUserId != null) {
             wrapper.eq("user_id", String.valueOf(currentUserId));
         }
-        return conversationService.list(wrapper);
+        return ApiResponse.success(conversationService.list(wrapper));
     }
 
     /**
@@ -87,8 +88,8 @@ public class ConversationController {
      */
     @Operation(summary = "根据ID查询会话")
     @GetMapping("/{id}")
-    public Conversation getById(@PathVariable Integer id) {
-        return conversationService.getById(id);
+    public ApiResponse<Conversation> getById(@PathVariable Integer id) {
+        return ApiResponse.success(conversationService.getById(id));
     }
 
     /**
@@ -101,9 +102,9 @@ public class ConversationController {
      */
     @Operation(summary = "更新会话标题")
     @PutMapping("/{id}")
-    public boolean update(@PathVariable Integer id, @RequestBody Conversation conversation) {
+    public ApiResponse<Boolean> update(@PathVariable Integer id, @RequestBody Conversation conversation) {
         conversation.setId(id);
-        return conversationService.updateById(conversation);
+        return ApiResponse.success(conversationService.updateById(conversation));
     }
 
     /**
@@ -116,9 +117,9 @@ public class ConversationController {
      */
     @Operation(summary = "删除会话及其关联数据")
     @DeleteMapping("/{id}")
-    public boolean delete(@PathVariable Integer id) {
+    public ApiResponse<Boolean> delete(@PathVariable Integer id) {
         lifecycleService.deleteConversation(id);
-        return true;
+        return ApiResponse.success(true);
     }
 
     /**
@@ -130,11 +131,11 @@ public class ConversationController {
      */
     @Operation(summary = "手动清理过期会话")
     @PostMapping("/cleanup")
-    public Map<String, Object> cleanup(@RequestParam(required = false, defaultValue = "30") int days) {
+    public ApiResponse<Map<String, Object>> cleanup(@RequestParam(required = false, defaultValue = "30") int days) {
         int count = lifecycleService.cleanupBeforeDays(days);
         Map<String, Object> result = new HashMap<>();
         result.put("deleted", count);
         result.put("success", true);
-        return result;
+        return ApiResponse.success(result);
     }
 }

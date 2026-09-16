@@ -42,12 +42,14 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        前端层 (Thymeleaf)                        │
-│  index.html(对话) │ courses │ knowledge │ quiz │ plan │ stats   │
+│                    前端层 (Vue 3 SPA, frontend/)                 │
+│  Vue 3 + Vite + TypeScript + Element Plus + Pinia + Vue Router  │
+│  开发: Vite Dev Server(5173) → 代理 /api → 后端(8080)            │
+│  生产: Vite 构建产物 → Spring Boot 托管 (src/main/resources/static)│
 └───────────────────────────┬─────────────────────────────────────┘
                             │ HTTP / SSE
 ┌───────────────────────────┴─────────────────────────────────────┐
-│                      控制器层 (REST API)                         │
+│                      控制器层 (REST API /api/**)                 │
 │  AuthController │ AgentController │ CoursesController │ ...     │
 └───────────────────────────┬─────────────────────────────────────┘
                             │
@@ -107,6 +109,7 @@
 
 - JDK 17+
 - Maven 3.8+
+- Node.js 18+（前端构建）
 - Docker & Docker Compose
 - DashScope API Key（[获取地址](https://dashscope.console.aliyun.com/)）
 
@@ -116,24 +119,39 @@
 # 1. 配置环境变量
 export DASHSCOPE_API_KEY=sk-xxxxxxxxxxxx
 
-# 2. 一键启动
+# 2. 一键启动（自动构建前端 + 后端）
 ./run.sh start
 
 # 3. 访问
-open http://localhost:8080/login.html
+open http://localhost:8080/login
 ```
 
-### 方式二：手动启动
+### 方式二：手动启动（生产模式，Spring Boot 托管前端）
 
 ```bash
 # 1. 启动 PostgreSQL
 docker-compose up -d
 
-# 2. 编译打包
+# 2. 构建前端（产物输出到 src/main/resources/static）
+cd frontend && npm install && npm run build && cd ..
+
+# 3. 编译打包后端
 ./mvnw clean package -DskipTests
 
-# 3. 运行
+# 4. 运行
 java -jar target/ai-review-assistant-0.0.1-SNAPSHOT.jar
+```
+
+### 方式三：开发模式（前后端分离联调）
+
+```bash
+# 终端 1：启动后端
+./mvnw spring-boot:run
+
+# 终端 2：启动前端 Vite Dev Server（5173 端口，/api 自动代理到 8080）
+cd frontend && npm install && npm run dev
+
+# 访问 http://localhost:5173 ，前端热更新，API 走代理联调
 ```
 
 ### 启动脚本命令
@@ -155,13 +173,13 @@ java -jar target/ai-review-assistant-0.0.1-SNAPSHOT.jar
 
 | 页面 | 地址 | 说明 |
 |------|------|------|
-| 🔑 登录注册 | `/login.html` | JWT 认证，注册后自动登录 |
+| 🔑 登录注册 | `/login` | JWT 认证，注册后自动登录 |
 | 💬 智能对话 | `/` | SSE 流式对话，会话侧栏，Markdown 渲染 |
-| 📖 课程管理 | `/courses.html` | 课程 CRUD，跳转对话 |
-| 🗄️ 知识库 | `/knowledge.html` | 上传文档，查看知识分块（分页） |
-| 📝 交互练习 | `/quiz.html` | AI 出题，选择作答，自动批改 |
-| 📋 复习计划 | `/plan.html` | AI 生成每日复习计划 |
-| 📊 学习统计 | `/stats.html` | 综合评分，错题本管理 |
+| 📖 课程管理 | `/courses` | 课程 CRUD，跳转对话 |
+| 🗄️ 知识库 | `/knowledge` | 上传文档，查看知识分块（分页） |
+| 📝 交互练习 | `/quiz` | AI 出题，选择作答，自动批改 |
+| 📋 复习计划 | `/plan` | AI 生成每日复习计划 |
+| 📊 学习统计 | `/stats` | 综合评分，错题本管理 |
 | 📡 API 文档 | `/swagger-ui/index.html` | OpenAPI 3.0 交互式文档 |
 | 🏥 健康检查 | `/actuator/health` | 服务健康状态 |
 
@@ -189,11 +207,11 @@ java -jar target/ai-review-assistant-0.0.1-SNAPSHOT.jar
 
 | 方法 | 路径 | 说明 | 认证 |
 |------|------|------|------|
-| GET | `/courses` | 查询我的课程列表 | ✅ |
-| GET | `/courses/{id}` | 查询课程详情 | ✅ |
-| POST | `/courses` | 新建课程 | ✅ |
-| PUT | `/courses/{id}` | 更新课程 | ✅ |
-| DELETE | `/courses/{id}` | 删除课程 | ✅ |
+| GET | `/api/courses` | 查询我的课程列表 | ✅ |
+| GET | `/api/courses/{id}` | 查询课程详情 | ✅ |
+| POST | `/api/courses` | 新建课程 | ✅ |
+| PUT | `/api/courses/{id}` | 更新课程 | ✅ |
+| DELETE | `/api/courses/{id}` | 删除课程 | ✅ |
 
 ### 知识库
 
@@ -209,7 +227,7 @@ java -jar target/ai-review-assistant-0.0.1-SNAPSHOT.jar
 
 | 方法 | 路径 | 说明 | 认证 |
 |------|------|------|------|
-| POST | `/api/quiz/generate?topic=xx&count=3` | 生成练习题 | ✅ |
+| POST | `/api/quiz/generate` | 生成练习题（body: courseId/topic/count） | ✅ |
 | POST | `/api/quiz/grade` | 提交答案并自动批改（答错入错题本） | ✅ |
 
 ### 复习计划
@@ -217,7 +235,7 @@ java -jar target/ai-review-assistant-0.0.1-SNAPSHOT.jar
 | 方法 | 路径 | 说明 | 认证 |
 |------|------|------|------|
 | POST | `/api/plan?course=xx&days=7` | 生成复习计划 | ✅ |
-| POST | `/api/plan/generate?courseName=xx&days=7天` | 生成复习计划（页面调用） | ✅ |
+| POST | `/api/plan/generate` | 生成复习计划（body: courseId/days） | ✅ |
 
 ### 错题本
 
@@ -240,68 +258,42 @@ java -jar target/ai-review-assistant-0.0.1-SNAPSHOT.jar
 ## 项目结构
 
 ```
-src/main/java/com/aiservice/aireviewassistant/
-├── AiReviewAssistantApplication.java    # 启动类
+├── frontend/                            # ⭐ 前端项目（Vue 3 SPA，独立管理）
+│   ├── src/
+│   │   ├── api/                         # API 封装（axios + JWT 刷新拦截器）
+│   │   ├── components/                  # 公共组件（NavBar/AppLayout/MarkdownRenderer）
+│   │   ├── router/                      # Vue Router（干净路径路由）
+│   │   ├── stores/                      # Pinia 状态（auth/chat）
+│   │   ├── views/                       # 页面（Login/Chat/Courses/Knowledge/Quiz/Plan/Stats）
+│   │   ├── main.ts                      # 入口
+│   │   └── styles/                      # 全局样式（设计系统 CSS 变量）
+│   ├── public/                          # 静态资源（favicon）
+│   ├── vite.config.ts                   # Vite 配置（dev 代理 /api → 8080）
+│   └── package.json
 │
-├── agent/tool/                          # Agent 工具层
-│   ├── AgentTool.java                   # 工具接口
-│   ├── ToolRegistry.java                # 工具注册表（Spring 自动收集）
-│   ├── ToolContext.java                 # 工具执行上下文
-│   ├── ChainExecutor.java              # 多步工具链执行器
-│   ├── QuestionTool.java               # RAG 问答工具
-│   ├── QuizTool.java                   # 出题工具
-│   ├── PlanTool.java                   # 复习计划工具
-│   ├── ChatTool.java                   # 普通对话工具
-│   ├── SummaryTool.java                # 摘要工具
-│   └── ExplainTool.java                # 知识点解释工具
-│
-├── annotation/                          # 自定义注解
-│   └── RateLimit.java                  # 限流注解
-│
-├── aspect/                              # AOP 切面
-│   └── RateLimitAspect.java            # 限流切面（Bucket4j 令牌桶）
-│
-├── common/                              # 公共组件
-│   └── ApiResponse.java                # 统一响应体
-│
-├── config/                              # 配置类（13个）
-│   ├── AppConfig.java                  # 共享 ObjectMapper
-│   ├── CacheConfig.java                # Caffeine 缓存
-│   ├── ChatClientConfig.java           # Spring AI 多模型适配
-│   ├── JwtProperties.java              # JWT 双令牌生成/解析/验证
-│   ├── SecurityConfig.java             # Spring Security + JWT
-│   ├── VectorStoreConfig.java          # PgVectorStore
-│   ├── PromptTemplate.java             # Prompt 模板加载器
-│   └── ...                             # 其他配置
-│
-├── controller/                          # 控制器层（11个）
-│   ├── AuthController.java             # 认证（注册/登录/刷新）
-│   ├── AgentController.java            # Agent 对话入口
-│   ├── QuizController.java             # 练习题 + 批改
-│   ├── WrongAnswerBookController.java  # 错题本
-│   ├── ReviewStatsController.java      # 学习统计
-│   └── ...                             # 其他控制器
-│
-├── dto/                                 # 数据传输对象（8个）
-├── entity/                              # 数据库实体（8个）
-├── exception/                           # 异常处理（3个）
-├── mapper/                              # MyBatis-Plus Mapper（8个）
-├── metrics/                             # 监控指标
-├── security/                            # JWT 认证过滤器
-│
-└── service/                             # 业务逻辑层
-    └── impl/
-        ├── ReviewAssistantAgent.java   # ⭐ Agent 核心
-        ├── RagServiceImpl.java         # ⭐ RAG 引擎
-        ├── DocumentServiceImpl.java    # 文档处理
-        └── ...                         # 其他服务
-
-src/main/resources/
-├── application.yml                     # 主配置
-├── application-prod.yml                # 生产环境配置
-├── prompts/                            # Prompt 模板（10个）
-├── templates/                          # 前端页面（7个）
-└── logback-spring.xml                  # 日志配置
+└── src/main/
+    ├── java/com/aiservice/aireviewassistant/
+    │   ├── AiReviewAssistantApplication.java    # 启动类
+    │   ├── agent/tool/                          # Agent 工具层（6大工具）
+    │   ├── annotation/                          # 自定义注解（RateLimit）
+    │   ├── aspect/                              # AOP 切面（Bucket4j 限流）
+    │   ├── common/                              # 统一响应体 ApiResponse
+    │   ├── config/                              # 配置类（JWT/Security/VectorStore...）
+    │   ├── controller/                          # REST API 控制器（/api/**）
+    │   ├── dto/                                 # 数据传输对象
+    │   ├── entity/                              # 数据库实体
+    │   ├── exception/                           # 全局异常处理
+    │   ├── mapper/                              # MyBatis-Plus Mapper
+    │   ├── metrics/                             # 监控指标
+    │   ├── security/                            # JWT 认证过滤器
+    │   └── service/                             # 业务逻辑层（Agent/RAG 核心）
+    │
+    └── resources/
+        ├── application.yml                     # 主配置
+        ├── application-prod.yml                # 生产环境配置
+        ├── prompts/                            # Prompt 模板
+        ├── static/                             # ⭐ Vue 构建产物（生产托管）
+        └── logback-spring.xml                  # 日志配置
 ```
 
 ---

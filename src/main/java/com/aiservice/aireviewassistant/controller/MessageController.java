@@ -1,5 +1,6 @@
 package com.aiservice.aireviewassistant.controller;
 
+import com.aiservice.aireviewassistant.common.ApiResponse;
 import com.aiservice.aireviewassistant.entity.Message;
 import com.aiservice.aireviewassistant.service.MessageService;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
@@ -35,11 +36,11 @@ public class MessageController {
      * @return 该会话下的消息列表
      */
     @GetMapping
-    public List<Message> listByConversation(@RequestParam Integer conversationId) {
+    public ApiResponse<List<Message>> listByConversation(@RequestParam Integer conversationId) {
         QueryWrapper<Message> wrapper = new QueryWrapper<>();
         wrapper.eq("conversation_id", conversationId);
         wrapper.orderByAsc("created_at");
-        return messageService.list(wrapper);
+        return ApiResponse.success(messageService.list(wrapper));
     }
 
     /**
@@ -51,7 +52,7 @@ public class MessageController {
      * @return 是否保存成功
      */
     @PostMapping
-    public boolean save(@RequestBody Message message) {
-        return messageService.save(message);
+    public ApiResponse<Boolean> save(@RequestBody Message message) {
+        return ApiResponse.success(messageService.save(message));
     }
 }
