@@ -66,6 +66,34 @@ public class AgentController {
     public Flux<String> stream(@RequestParam("message") @NotBlank(message = "消息内容不能为空") String message,
                                @RequestParam(required = false) Integer conversationId,
                                @RequestAttribute(required = false) Integer currentUserId) {
-        return agent.chatStream(message, conversationId, currentUserId);
+        return agent.chatStream(message, conversationId, currentUserId)
+                // ⚠️ 关键: SSE 规范要求客户端剥离每个 data 行后的一个前导空格
+                // (https://html.spec.whatwg.org/multipage/server-sent-events.html#event-stream-interpretation)
+                // Spring 编码器把含换行的 token 拆成多个 "data:" 行, 且不追加空格;
+                // 若某行内容本身以空格开头(markdown 缩进/硬换行/列表续行), 该空格会被浏览器吃掉。
+                // 故为"每一行"预置一个空格, 经浏览器剥离后与原始 token 逐字节一致。
+                .map(AgentController::padSseLines);
+    }
+
+    /**
+     * 为 SSE 数据的每一行预置一个前导空格。
+     * <p>浏览器解析 SSE 时会剥离每个 {@code data:} 行后的一个空格，
+     * 服务端逐行补位后即可保证含前导空格的文本（markdown 缩进、硬换行等）无损传输。</p>
+     *
+     * @param frame 原始 SSE 帧内容
+     * @return 每行前均带一个空格的帧内容
+     */
+    private static String padSseLines(String frame) {
+        StringBuilder sb = new StringBuilder(frame.length() + 8);
+        sb.append(' ');
+        for (int i = 0; i < frame.length(); i++) {
+            char c = frame.charAt(i);
+            sb.append(c);
+            if (c == '\n' && i < frame.length() - 1) {
+                // 换行后补位(行尾换行由 Spring 生成的行本身无需再补)
+                sb.append(' ');
+            }
+        }
+        return sb.toString();
     }
 }

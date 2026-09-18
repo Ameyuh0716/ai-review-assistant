@@ -71,8 +71,9 @@ const avatarText = computed(() => {
 
 <style scoped>
 .navbar {
-  background: rgba(255, 255, 255, 0.92);
+  background: rgba(255, 255, 255, 0.85);
   backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
   border-bottom: 1px solid var(--color-border);
   height: var(--navbar-height);
   display: flex;
@@ -107,17 +108,24 @@ const avatarText = computed(() => {
 .brand-icon {
   width: 36px;
   height: 36px;
-  border-radius: var(--radius-sm);
-  background: var(--color-primary);
+  border-radius: 11px;
+  background: var(--gradient-brand);
   color: #fff;
   display: flex;
   align-items: center;
   justify-content: center;
+  box-shadow: var(--shadow-primary);
+  transition: transform var(--t-normal) var(--ease-spring),
+    box-shadow var(--t-normal) var(--ease);
+}
+.navbar-brand:hover .brand-icon {
+  transform: rotate(-6deg) scale(1.06);
+  box-shadow: var(--shadow-primary-lg);
 }
 .nav-links {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 .nav-link {
   display: flex;
@@ -128,12 +136,37 @@ const avatarText = computed(() => {
   color: var(--color-muted-foreground);
   font-size: 14px;
   font-weight: 500;
-  transition: all var(--t-fast) var(--ease);
+  cursor: pointer;
+  position: relative;
+  transition: all var(--t-normal) var(--ease);
 }
-.nav-link:hover,
+.nav-link:hover {
+  color: var(--color-primary);
+  background: var(--color-primary-50);
+}
 .nav-link.active {
   color: var(--color-primary);
   background: var(--color-primary-50);
+  font-weight: 600;
+}
+/* 激活指示: 底部渐变短线 (贴合导航栏底边) */
+.nav-link.active::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -15px;
+  transform: translateX(-50%);
+  width: 24px;
+  height: 3px;
+  border-radius: 3px 3px 0 0;
+  background: var(--gradient-primary);
+}
+.nav-link .el-icon {
+  transition: transform var(--t-normal) var(--ease-spring);
+}
+.nav-link:hover .el-icon,
+.nav-link.active .el-icon {
+  transform: scale(1.1);
 }
 .nav-user {
   display: flex;
@@ -154,11 +187,17 @@ const avatarText = computed(() => {
   font-size: 20px;
 }
 @media (max-width: 768px) {
+  .navbar-inner {
+    padding: 0 16px;
+  }
   .nav-links .nav-link span {
     display: none;
   }
   .sidebar-toggle {
     display: flex;
+  }
+  .nav-nickname {
+    display: none;
   }
 }
 </style>

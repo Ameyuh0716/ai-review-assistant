@@ -11,12 +11,15 @@
       <el-col v-for="plan in plans" :key="plan.id" :xs="24" :sm="12" :md="8">
         <el-card class="plan-card" shadow="hover">
           <div class="plan-header">
-            <h3>{{ plan.title }}</h3>
+            <h3>{{ plan.courseName }}</h3>
             <el-button link type="danger" @click="deletePlanItem(plan.id)">
               <el-icon><Delete /></el-icon>
             </el-button>
           </div>
-          <p class="plan-time">{{ formatTime(plan.createdAt) }}</p>
+          <p class="plan-time">
+            <el-tag size="small" type="primary" effect="plain">{{ plan.availableDays }}</el-tag>
+            <span class="plan-date">{{ formatTime(plan.createdAt) }}</span>
+          </p>
           <div class="plan-content">
             <MarkdownRenderer :content="plan.content" />
           </div>
@@ -92,8 +95,8 @@ async function handleGenerate() {
     const content = await planApi.generatePlan(generateForm.value.courseId, generateForm.value.days)
     const course = courses.value.find(c => c.id === generateForm.value.courseId)
     await planApi.savePlan(
-      generateForm.value.courseId,
-      `${course?.name || '课程'} ${generateForm.value.days}天复习计划`,
+      course?.name || '课程',
+      `${generateForm.value.days}天`,
       content
     )
     ElMessage.success('生成成功')
@@ -131,8 +134,9 @@ function formatTime(d?: string) {
 }
 .page-header h2 {
   margin: 0;
-  font-size: 22px;
+  font-size: 24px;
   font-weight: 700;
+  letter-spacing: -0.5px;
 }
 .plan-card {
   margin-bottom: 16px;
@@ -153,6 +157,12 @@ function formatTime(d?: string) {
   color: var(--color-muted-foreground);
   font-size: 12px;
   margin: 0 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.plan-date {
+  color: var(--color-muted-foreground);
 }
 .plan-content {
   max-height: 300px;

@@ -2,6 +2,7 @@ package com.aiservice.aireviewassistant.controller;
 
 import com.aiservice.aireviewassistant.common.ApiResponse;
 import com.aiservice.aireviewassistant.service.DocumentService;
+import io.swagger.v3.oas.annotations.Operation;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import org.springframework.validation.annotation.Validated;
@@ -50,6 +51,10 @@ public class DocumentController {
             return ApiResponse.error(400, "请选择要上传的文件");
         }
         String message = documentService.uploadAndVectorize(courseId, file);
+        // 服务层以 "错误：" 前缀表示业务失败，转换为错误响应码
+        if (message != null && message.startsWith("错误：")) {
+            return ApiResponse.error(400, message.substring(3));
+        }
         Map<String, Object> result = new HashMap<>();
         result.put("message", message);
         result.put("courseId", courseId);
@@ -58,18 +63,23 @@ public class DocumentController {
 
     /**
      * 直接导入文本内容。
-     * <p>HTTP: {@code POST /api/document/import?courseId=1}</p>
-     * <p>适用于前端直接粘贴文本或测试场景，导入后同样会进行向量化处理。</p>
+     * <p>HTTP: {@code POST /api/document/import?courseId=1}，
+     * 请求体为纯文本（Content-Type: text/plain），导入后同样会进行向量化处理。</p>
      *
      * @param courseId 课程 ID，不能为空
      * @param content  待导入的文本内容，不能为空
      * @return 处理结果提示文本
      */
-    @PostMapping("/import")
+    @Operation(summary = "直接导入文本内容", description = "请求体为纯文本(text/plain)，非 JSON 字符串")
+    @PostMapping(value = "/import", consumes = org.springframework.http.MediaType.TEXT_PLAIN_VALUE)
     public ApiResponse<Map<String, Object>> importContent(
             @RequestParam("courseId") @NotNull(message = "课程ID不能为空") Integer courseId,
             @RequestBody @NotBlank(message = "内容不能为空") String content) {
-        String message = documentService.importContent(courseId, content);
+        String message = documentService.importContent(courseId, content.trim());
+        // 服务层以 "错误：" 前缀表示业务失败，转换为错误响应码
+        if (message != null && message.startsWith("错误：")) {
+            return ApiResponse.error(400, message.substring(3));
+        }
         Map<String, Object> result = new HashMap<>();
         result.put("message", message);
         result.put("courseId", courseId);

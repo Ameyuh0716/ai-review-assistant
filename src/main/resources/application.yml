@@ -12,8 +12,8 @@ spring:
       enabled: false
 
   # PostgreSQL 数据库配置
-  # 默认连接 Docker 中的 pgvector PostgreSQL (docker-compose.yml)
-  # 如果本地有 PostgreSQL 占用 5432 端口，请先停止: brew services stop postgresql@16
+  # 统一连接 Docker 中的 pgvector PostgreSQL (docker-compose.yml)
+  # 本机 Homebrew PostgreSQL 已卸载，勿再安装本机实例以免占用 5432 端口
   datasource:
     url: jdbc:postgresql://localhost:5432/review_db?currentSchema=public&connectTimeout=60&socketTimeout=60
     username: ${DB_USERNAME:postgres}

@@ -111,35 +111,88 @@ async function handleRegister() {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #eff6ff 0%, #f0fdf4 100%);
+  position: relative;
+  overflow: hidden;
+  background: var(--gradient-hero);
   padding: 24px;
 }
+/* 柔和光晕: 紫罗兰 + 翠绿, 营造典雅活力氛围 */
+.login-page::before,
+.login-page::after {
+  content: '';
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  pointer-events: none;
+}
+.login-page::before {
+  width: 480px;
+  height: 480px;
+  left: -140px;
+  top: -120px;
+  background: radial-gradient(circle, rgba(124, 58, 237, 0.16) 0%, transparent 70%);
+  animation: float-slow 14s ease-in-out infinite alternate;
+}
+.login-page::after {
+  width: 420px;
+  height: 420px;
+  right: -120px;
+  bottom: -100px;
+  background: radial-gradient(circle, rgba(5, 150, 105, 0.14) 0%, transparent 70%);
+  animation: float-slow 18s ease-in-out infinite alternate-reverse;
+}
+@keyframes float-slow {
+  from { transform: translate(0, 0) scale(1); }
+  to { transform: translate(32px, 24px) scale(1.08); }
+}
 .login-card {
+  position: relative;
+  z-index: 1;
   width: 100%;
   max-width: 420px;
-  background: var(--color-card);
-  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  border-radius: var(--radius-xl);
   padding: 40px;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.06);
+  box-shadow: var(--shadow-lg);
+  animation: card-in var(--t-slow) var(--ease-spring) both;
+}
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 .brand {
   text-align: center;
   margin-bottom: 32px;
 }
 .brand-icon {
-  width: 56px;
-  height: 56px;
-  border-radius: var(--radius-md);
-  background: var(--color-primary);
+  width: 60px;
+  height: 60px;
+  border-radius: 18px;
+  background: var(--gradient-brand);
   display: flex;
   align-items: center;
   justify-content: center;
-  margin: 0 auto 16px;
+  margin: 0 auto 18px;
+  box-shadow: var(--shadow-primary);
 }
 .brand h1 {
   margin: 0 0 8px;
   font-size: 24px;
-  font-weight: 700;
+  font-weight: 800;
+  letter-spacing: -0.5px;
+  background: linear-gradient(135deg, #1E1B31 30%, #7C3AED 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
 .brand p {
   margin: 0;

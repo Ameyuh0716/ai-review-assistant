@@ -42,9 +42,11 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function login(username: string, password: string) {
     const res = await authApi.login(username, password)
-    setTokens(res.token, res.refreshToken, res.expiresIn)
+    if (res.token && res.refreshToken) {
+      setTokens(res.token, res.refreshToken, res.expiresIn)
+    }
     user.value = {
-      id: res.id,
+      id: res.userId,
       username: res.username,
       nickname: res.nickname,
       role: res.role
@@ -54,9 +56,11 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function register(username: string, password: string, nickname?: string) {
     const res = await authApi.register(username, password, nickname)
-    setTokens(res.token, res.refreshToken, res.expiresIn)
+    if (res.token && res.refreshToken) {
+      setTokens(res.token, res.refreshToken, res.expiresIn)
+    }
     user.value = {
-      id: res.id,
+      id: res.userId,
       username: res.username,
       nickname: res.nickname,
       role: res.role
@@ -65,18 +69,15 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function fetchUserInfo() {
-    try {
-      const res = await authApi.me()
-      user.value = {
-        id: res.id,
-        username: res.username,
-        nickname: res.nickname,
-        role: res.role
-      }
-      return res
-    } catch (e) {
-      return null
+    // 失败时向上抛出，由路由守卫统一处理跳转登录页
+    const res = await authApi.me()
+    user.value = {
+      id: res.userId,
+      username: res.username,
+      nickname: res.nickname,
+      role: res.role
     }
+    return res
   }
 
   function logout() {

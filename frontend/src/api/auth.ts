@@ -1,10 +1,10 @@
 import { post, get } from './request'
 
 export interface LoginResponse {
-  token: string
-  refreshToken: string
+  token: string | null
+  refreshToken: string | null
   expiresIn: number
-  id: number
+  userId: number
   username: string
   nickname: string
   role: string

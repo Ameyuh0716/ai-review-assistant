@@ -131,17 +131,30 @@ function parseQuestions(md: string): QuizQuestion[] {
   const list: QuizQuestion[] = []
   const blocks = md.split(/\n(?=#{1,3}\s*题目)/).filter(b => b.trim())
   for (const block of blocks) {
-    const qMatch = block.match(/#{1,3}\s*题目\s*\d*[：:\s]*(.*)/)
+    // 标题行格式: ### 题目 N：科目名 (冒号后是科目, 不是题干)
+    const titleMatch = block.match(/#{1,3}\s*题目\s*\d*[：:\s]*(.*)/)
+    if (!titleMatch) continue
+
+    // 去掉标题行, 剩余内容为题干 + 选项 + 答案
+    const firstNewline = block.indexOf('\n')
+    const rest = firstNewline >= 0 ? block.slice(firstNewline + 1) : ''
+
+    // 题干: 从剩余内容开头到第一个选项行 (A. / B. ...) 之间的文本
+    const firstOptIdx = rest.search(/(?:^|\n)\s*[A-D][.．、]\s/)
+    const questionText = (firstOptIdx > 0 ? rest.slice(0, firstOptIdx) : rest)
+      .replace(/\*\*答案[：:][\s\S]*$/, '')
+      .trim()
+
     const opts: string[] = []
-    const optMatches = block.matchAll(/\n\s*([A-D])[.．、]\s*(.+?)(?=\n\s*[A-D][.．、]|\n\s*答案|\n\s*\*\*答案|$)/g)
+    const optMatches = rest.matchAll(/\n\s*([A-D])[.．、]\s*(.+?)(?=\n\s*[A-D][.．、]|\n\s*答案|\n\s*\*\*答案|$)/g)
     for (const m of optMatches) {
       opts.push(m[2].trim())
     }
-    const answerMatch = block.match(/\*\*答案[：:]\s*([A-D])\*\*/)
-    const explainMatch = block.match(/\*\*解析[：:]\*\*\s*([\s\S]*?)(?=\n#{1,3}\s*题目|$)/)
-    if (qMatch && opts.length >= 2) {
+    const answerMatch = rest.match(/\*\*答案[：:]\s*([A-D])\*\*/)
+    const explainMatch = rest.match(/\*\*解析[：:]\*\*\s*([\s\S]*?)(?=\n#{1,3}\s*题目|$)/)
+    if (questionText && opts.length >= 2) {
       list.push({
-        question: qMatch[1].trim(),
+        question: questionText,
         options: opts,
         answer: answerMatch ? answerMatch[1] : '',
         explanation: explainMatch ? explainMatch[1].trim() : ''
@@ -184,8 +197,9 @@ async function submitQuiz() {
 }
 .page-header h2 {
   margin: 0;
-  font-size: 22px;
+  font-size: 24px;
   font-weight: 700;
+  letter-spacing: -0.5px;
 }
 .empty-card {
   border-radius: var(--radius-md);
@@ -194,16 +208,55 @@ async function submitQuiz() {
 .quiz-card {
   margin-bottom: 16px;
   border-radius: var(--radius-md);
+  transition: box-shadow var(--t-normal) var(--ease);
+}
+.quiz-card:hover {
+  box-shadow: var(--shadow-md);
 }
 .question-title {
   font-size: 16px;
   font-weight: 600;
   margin-bottom: 16px;
+  line-height: 1.5;
 }
 .options {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
+}
+/* 选项: 优雅卡片式交互 */
+.options :deep(.el-radio) {
+  display: flex;
+  align-items: flex-start;
+  width: 100%;
+  height: auto;
+  margin-right: 0;
+  padding: 12px 16px;
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-card);
+  transition: all var(--t-fast) var(--ease);
+  white-space: normal;
+}
+.options :deep(.el-radio:hover) {
+  border-color: var(--color-primary-light);
+  background: var(--color-primary-50);
+  transform: translateX(2px);
+}
+.options :deep(.el-radio.is-checked) {
+  border-color: var(--color-primary);
+  background: var(--color-primary-50);
+  box-shadow: 0 0 0 3px var(--color-primary-100);
+}
+.options :deep(.el-radio__label) {
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: normal;
+  color: var(--color-foreground);
+}
+.options :deep(.el-radio.is-checked .el-radio__label) {
+  color: var(--color-primary-dark);
+  font-weight: 500;
 }
 .quiz-actions {
   display: flex;
@@ -218,15 +271,18 @@ async function submitQuiz() {
   margin-bottom: 20px;
 }
 .detail-item {
-  padding: 12px;
+  padding: 12px 14px;
   border-radius: var(--radius-sm);
   margin-bottom: 12px;
+  border-left: 3px solid transparent;
 }
 .detail-item.correct {
   background: var(--color-success-light);
+  border-left-color: var(--color-success);
 }
 .detail-item.wrong {
   background: var(--color-danger-light);
+  border-left-color: var(--color-danger);
 }
 .explanation {
   color: var(--color-muted-foreground);

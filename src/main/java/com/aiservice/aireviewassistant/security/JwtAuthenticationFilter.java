@@ -53,7 +53,9 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         if (token == null) {
             String tokenParam = request.getParameter("token");
             if (tokenParam != null && !tokenParam.isBlank()) {
-                token = jwtProperties.extractToken(tokenParam);
+                // query 参数兼容两种格式: 裸 token 或 "Bearer xxx"
+                String extracted = jwtProperties.extractToken(tokenParam);
+                token = extracted != null ? extracted : tokenParam.trim();
             }
         }
 

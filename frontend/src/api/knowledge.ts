@@ -1,9 +1,14 @@
-import { get, post, del } from './request'
+import { get, post, del, AI_TIMEOUT } from './request'
 
 export interface DocumentChunk {
   id: string
   content: string
-  metadata: Record<string, unknown>
+  /** 元数据 JSON 字符串（使用时需 JSON.parse） */
+  metadata: string
+  courseId: number | null
+  /** 分块在原文档中的序号（后端已从 metadata 解析，直接使用） */
+  chunkIndex: number | null
+  chunkTotal: number | null
 }
 
 export interface ChunkPage {
@@ -14,18 +19,35 @@ export interface ChunkPage {
   pages: number
 }
 
+export interface UploadResult {
+  /** 后端处理结果描述，例如“成功：文档已分块并向量化，共处理 4 块” */
+  message: string
+  courseId: number
+}
+
+/** 单个文件大小上限，与后端 application.yml 的 spring.servlet.multipart 配置保持一致 */
+export const MAX_UPLOAD_SIZE = 10 * 1024 * 1024
+
+/** 允许上传的扩展名（按扩展名校验，不依赖浏览器上报的 MIME 类型） */
+export const ALLOWED_UPLOAD_EXTENSIONS = ['.txt', '.md', '.markdown', '.pdf', '.docx']
+
 export function uploadDocument(courseId: number, file: File) {
   const formData = new FormData()
   formData.append('file', file)
   formData.append('courseId', String(courseId))
-  return post<{ documentId: number; chunkCount: number }>('/api/document/upload', formData, {
-    headers: { 'Content-Type': 'multipart/form-data' }
+  // 不手动设置 Content-Type：axios 会自动生成带 boundary 的 multipart 头，
+  // 手动指定反而可能导致后端无法解析。
+  // 上传后需调用 Embedding 接口向量化，耗时较长，故使用 AI_TIMEOUT。
+  return post<UploadResult>('/api/document/upload', formData, {
+    timeout: AI_TIMEOUT,
+    // 由上传组件展示具体失败原因，这里关闭全局提示避免重复弹窗
+    skipErrorToast: true
   })
 }
 
 export function listChunks(courseId: number, page: number = 1, size: number = 10) {
   return get<{ items: DocumentChunk[]; total: number; page: number; pageSize: number; totalPages: number }>(
-    `/api/knowledge-base/${courseId}/chunks?page=${page}&size=${size}`
+    `/api/knowledge-base/${courseId}/chunks?page=${page}&pageSize=${size}`
   ).then(res => ({
     records: res.items,
     total: res.total,

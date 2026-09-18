@@ -1,6 +1,13 @@
 import axios, { AxiosError, AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 import { useAuthStore } from '@/stores/auth'
 
+declare module 'axios' {
+  export interface AxiosRequestConfig {
+    /** 为 true 时不弹出全局错误提示，由调用方自行展示带上下文的提示（避免重复弹窗） */
+    skipErrorToast?: boolean
+  }
+}
+
 export interface ApiResponse<T = unknown> {
   code: number
   message: string
@@ -12,11 +19,16 @@ let refreshSubscribers: Array<(token: string) => void> = []
 
 const request = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || '',
-  timeout: 30000,
-  headers: {
-    'Content-Type': 'application/json'
-  }
+  timeout: 30000
+  // 注意：不要在这里设置全局 'Content-Type': 'application/json'。
+  // axios 对 FormData 的处理逻辑是「若 Content-Type 为 json 则把 FormData 序列化成 JSON」，
+  // 设置全局 json 头会让文件上传退化成 `JSON.stringify(formDataToJSON(data))`，
+  // 后端收不到 multipart 而报 MissingServletRequestParameterException(500)。
+  // axios 会自动为对象负载带上 application/json，为 FormData 带上正确的 multipart boundary。
 })
+
+/** AI 生成类接口专用超时（LLM 生成通常需要 30-90 秒） */
+export const AI_TIMEOUT = 120000
 
 function subscribeTokenRefresh(cb: (token: string) => void) {
   refreshSubscribers.push(cb)
@@ -64,7 +76,9 @@ request.interceptors.response.use(
   (response: AxiosResponse<ApiResponse>) => {
     const { data } = response
     if (data.code !== 0) {
-      ElMessage.error(data.message || '请求失败')
+      if (!response.config.skipErrorToast) {
+        ElMessage.error(data.message || '请求失败')
+      }
       return Promise.reject(new Error(data.message || '请求失败'))
     }
     return response
@@ -72,7 +86,12 @@ request.interceptors.response.use(
   async (error: AxiosError<ApiResponse>) => {
     const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean }
     const status = error.response?.status
-    console.error('[axios error]', error.config?.url, status, error.response?.data, error.message)
+    // 401 属预期内的会话过期流程（自动刷新），仅记录 warn，避免误导
+    if (status === 401) {
+      console.warn('[axios] 会话过期，尝试自动刷新:', error.config?.url)
+    } else {
+      console.error('[axios error]', error.config?.url, status, error.response?.data, error.message)
+    }
 
     if (status === 401 && !originalRequest._retry) {
       if (isRefreshing) {
@@ -106,7 +125,9 @@ request.interceptors.response.use(
     }
 
     const msg = error.response?.data?.message || error.message || '网络错误'
-    ElMessage.error(msg)
+    if (!originalRequest?.skipErrorToast) {
+      ElMessage.error(msg)
+    }
     return Promise.reject(error)
   }
 )

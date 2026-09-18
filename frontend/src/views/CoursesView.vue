@@ -143,12 +143,35 @@ function selectCourse(course: Course) {
 }
 .page-header h2 {
   margin: 0;
-  font-size: 22px;
+  font-size: 24px;
   font-weight: 700;
+  letter-spacing: -0.5px;
 }
 .course-card {
   margin-bottom: 16px;
   border-radius: var(--radius-md);
+  position: relative;
+  overflow: hidden;
+  transition: transform var(--t-normal) var(--ease), box-shadow var(--t-normal) var(--ease);
+}
+/* 左侧渐变装饰条: 悬停时点亮 */
+.course-card::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--gradient-brand);
+  opacity: 0;
+  transition: opacity var(--t-normal) var(--ease);
+}
+.course-card:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-md);
+}
+.course-card:hover::before {
+  opacity: 1;
 }
 .course-header {
   display: flex;
@@ -160,6 +183,7 @@ function selectCourse(course: Course) {
   margin: 0;
   font-size: 16px;
   font-weight: 600;
+  letter-spacing: -0.2px;
 }
 .course-actions {
   display: flex;

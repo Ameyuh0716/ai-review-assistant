@@ -119,8 +119,8 @@ check_local_postgres() {
     local proc_cmd
     proc_cmd=$(ps -p "$local_pg_pid" -o command= 2>/dev/null)
     if echo "$proc_cmd" | grep -qi "postgres" && ! echo "$proc_cmd" | grep -q "docker"; then
-        warn "本地 PostgreSQL 占用 5432 (PID: $local_pg_pid)"
-        warn "请先停止: brew services stop postgresql@16 或 pg_ctl stop"
+        warn "检测到非 Docker 的 PostgreSQL 占用 5432 (PID: $local_pg_pid)"
+        warn "本项目只使用 Docker 数据库，请停止该进程后重试"
         return 1
     fi
     return 0

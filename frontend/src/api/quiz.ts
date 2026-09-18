@@ -1,4 +1,4 @@
-import { post } from './request'
+import { post, AI_TIMEOUT } from './request'
 
 export interface QuizQuestion {
   question: string
@@ -21,7 +21,8 @@ export interface QuizResult {
 }
 
 export function generateQuiz(courseId: number, topic?: string, count: number = 5) {
-  return post<string>('/api/quiz/generate', { courseId, topic, count })
+  // LLM 出题耗时较长，使用 AI 专用超时
+  return post<string>('/api/quiz/generate', { courseId, topic, count }, { timeout: AI_TIMEOUT })
 }
 
 export function gradeQuiz(courseId: number, topic: string, questions: QuizQuestion[], answers: string[]) {

@@ -15,25 +15,15 @@ export function renderMarkdown(text: string): string {
   return DOMPurify.sanitize(raw, { ADD_ATTR: ['target'] })
 }
 
+/**
+ * 流式渲染 Markdown。
+ * <p>与最终渲染共用同一渲染管线（marked + DOMPurify），保证「流式累积结果」与
+ * 「历史消息重渲染结果」完全一致；marked 能安全处理未闭合的语法片段
+ * （如只收到 `**` 半截时按字面量渲染）。</p>
+ *
+ * @param text 截至当前的累积文本
+ * @returns 渲染后的安全 HTML
+ */
 export function renderStreamingMarkdown(text: string): string {
-  if (!text) return ''
-  let t = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
-  t = t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  t = t.replace(/^######\s+(.+)$/gm, '<h6>$1</h6>')
-  t = t.replace(/^#####\s+(.+)$/gm, '<h5>$1</h5>')
-  t = t.replace(/^####\s+(.+)$/gm, '<h4>$1</h4>')
-  t = t.replace(/^###\s+(.+)$/gm, '<h3>$1</h3>')
-  t = t.replace(/^##\s+(.+)$/gm, '<h2>$1</h2>')
-  t = t.replace(/^#\s+(.+)$/gm, '<h1>$1</h1>')
-  t = t.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
-  t = t.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-  t = t.replace(/\*(.+?)\*/g, '<em>$1</em>')
-  t = t.replace(/`([^`]+)`/g, '<code>$1</code>')
-  t = t.replace(/(?:^|\n)-\s+(.+)$/g, '<li>$1</li>')
-  t = t.replace(/\n{2,}/g, '</p><p>')
-  t = t.replace(/\n/g, '<br>')
-  if (!t.startsWith('<')) t = '<p>' + t
-  if (!t.endsWith('>')) t += '</p>'
-  t = t.replace(/(<li>.*?<\/li>)/s, '<ul>$1</ul>')
-  return t
+  return renderMarkdown(text)
 }

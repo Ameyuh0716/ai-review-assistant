@@ -14,6 +14,8 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
 import reactor.core.publisher.Flux;
 import reactor.test.StepVerifier;
 
@@ -62,6 +64,9 @@ class RagServiceImplTest {
     @Mock
     private ChatClient.StreamResponseSpec streamResponseSpec;
 
+    @Mock
+    private JdbcTemplate jdbcTemplate;
+
     private RagServiceImpl ragService;
 
     /**
@@ -71,7 +76,8 @@ class RagServiceImplTest {
     @BeforeEach
     void setUp() {
         // 构造 RagServiceImpl 实例，注入所有 mock 依赖
-        ragService = new RagServiceImpl(chatClient, vectorStore, promptTemplate, ragSearchLogService, ragProperties, agentMetrics, new ObjectMapper());
+        ragService = new RagServiceImpl(chatClient, vectorStore, promptTemplate, ragSearchLogService,
+                ragProperties, agentMetrics, new ObjectMapper(), jdbcTemplate);
     }
 
     /**

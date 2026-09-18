@@ -38,7 +38,7 @@
           </el-tag>
         </div>
 
-        <div ref="chatBoxRef" class="chat-box">
+        <div ref="chatBoxRef" class="chat-box" @scroll="handleScroll">
           <div v-if="messages.length === 0" class="welcome-msg">
             <h3>有什么可以帮你的？</h3>
             <p>我可以回答问题、生成测验或制定学习计划</p>
@@ -70,6 +70,19 @@
         </div>
 
         <div class="input-area">
+          <!-- 用户上翻阅读时不再强制拉回底部，改为提供显式返回入口 -->
+          <transition name="fade-up">
+            <button
+              v-if="!autoFollow"
+              class="scroll-to-bottom"
+              type="button"
+              aria-label="回到最新消息"
+              @click="jumpToBottom"
+            >
+              <el-icon><ArrowDown /></el-icon>
+              <span>回到最新</span>
+            </button>
+          </transition>
           <div class="input-row">
             <el-input
               v-model="inputText"
@@ -108,7 +121,7 @@ import { useChatStore } from '@/stores/chat'
 import * as conversationApi from '@/api/conversation'
 import { buildStreamUrl } from '@/api/agent'
 import type { Conversation, Message } from '@/api/conversation'
-import { Plus, Close } from '@element-plus/icons-vue'
+import { Plus, Close, ArrowDown } from '@element-plus/icons-vue'
 
 const authStore = useAuthStore()
 const chatStore = useChatStore()
@@ -125,6 +138,19 @@ const sidebarVisible = ref(false)
 const errorMsg = ref('')
 const chatBoxRef = ref<HTMLDivElement>()
 let eventSource: EventSource | null = null
+
+/**
+ * 是否自动跟随最新消息。
+ * <p>用户手动上翻阅读时置为 false，此时流式输出不再强制把视口拉回底部；
+ * 用户回到底部或点击“回到最新”后恢复为 true。</p>
+ */
+const autoFollow = ref(true)
+
+/** 距底部小于该像素数即视为“已贴底”，可继续自动跟随 */
+const BOTTOM_TOLERANCE_PX = 80
+
+/** 合并同一帧内的多次滚动请求，避免流式逐字更新时频繁触发重排 */
+let scrollPending = false
 
 onMounted(() => {
   chatStore.loadCourseFromStorage()
@@ -172,20 +198,33 @@ async function loadConversations() {
 }
 
 async function createNewChat() {
-  if (!currentConversationId.value && messages.value.length === 0) {
-    ElMessage.info('当前已经是最新对话')
+  // 当前已是空的新对话时避免重复创建
+  if (currentConversationId.value && messages.value.length === 0 && !streamingMsg.value) {
+    ElMessage.info('当前已经是新对话')
     return
   }
-  currentConversationId.value = null
-  currentTitle.value = '新对话'
-  messages.value = []
-  streamingMsg.value = ''
-  localStorage.removeItem('currentConversationId')
+  try {
+    const conv = await conversationApi.createConversation('新对话')
+    // 新会话插入列表顶部并立即选中
+    conversations.value = [conv, ...conversations.value]
+    currentConversationId.value = conv.id
+    currentTitle.value = conv.title || '新对话'
+    messages.value = []
+    streamingMsg.value = ''
+    autoFollow.value = true
+    localStorage.setItem('currentConversationId', String(conv.id))
+    sidebarVisible.value = false
+  } catch (e) {
+    console.error(e)
+    errorMsg.value = '创建对话失败，请稍后重试'
+  }
 }
 
 async function switchConversation(conv: Conversation) {
   currentConversationId.value = conv.id
   currentTitle.value = conv.title || '对话'
+  // 切换会话时重置跟随状态，并按新会话内容跳到最新
+  autoFollow.value = true
   localStorage.setItem('currentConversationId', String(conv.id))
   sidebarVisible.value = false
   try {
@@ -194,6 +233,8 @@ async function switchConversation(conv: Conversation) {
       ...m,
       content: m.intent === 'QUIZ' || m.intent === 'quiz' ? hideQuizAnswers(m.content) : m.content
     }))
+    // 历史消息渲染后可能有代码块/表格撑高，强制贴底
+    scrollToBottom(true)
   } catch (e) {
     console.error(e)
   }
@@ -208,6 +249,7 @@ async function deleteConversationItem(id: number) {
       currentConversationId.value = null
       currentTitle.value = '新对话'
       messages.value = []
+      autoFollow.value = true
       localStorage.removeItem('currentConversationId')
     }
     await loadConversations()
@@ -251,13 +293,16 @@ function sendMessage() {
   inputText.value = ''
   isStreaming.value = true
   streamingMsg.value = ''
+  // 主动发送时强制回到最新，确保用户能看到自己的提问
+  scrollToBottom(true)
 
   const url = buildStreamUrl(fullMsg, currentConversationId.value || undefined)
   eventSource = new EventSource(url)
   let metaParsed = false
 
   eventSource.onmessage = (event) => {
-    if (!event.data) return
+    // 注意: 不能用 !event.data 判断, 因为纯换行 token 的 data 就是 "\n"(真值) 或 ""(空行标记)
+    if (event.data === undefined || event.data === null) return
     if (!metaParsed) {
       metaParsed = true
       try {
@@ -268,10 +313,12 @@ function sendMessage() {
           return
         }
       } catch (e) {
-        // not meta
+        // 首帧非 JSON, 按内容处理
       }
     }
-    streamingMsg.value += event.data + '\n'
+    // 直接拼接: SSE 已将 token 内的换行拆分为多个 data 行并由 EventSource 还原为 \n
+    // 追加额外 \n 会破坏 markdown 连续文本 (每个 token 独立成段)
+    streamingMsg.value += event.data
   }
 
   eventSource.onerror = () => {
@@ -298,12 +345,37 @@ function stopGeneration() {
   loadConversations()
 }
 
-function scrollToBottom() {
+function handleScroll() {
+  const el = chatBoxRef.value
+  if (!el) return
+  // 以“距底部距离”判定是否继续跟随：拖到最底或点回到底部后会自动恢复跟随
+  autoFollow.value = el.scrollHeight - el.scrollTop - el.clientHeight <= BOTTOM_TOLERANCE_PX
+}
+
+/**
+ * 滚动到底部。
+ *
+ * @param force 为 true 时忽略“用户已上翻”状态强制贴底（发送消息、切换会话时使用）
+ */
+function scrollToBottom(force = false) {
+  if (!force && !autoFollow.value) return
+  if (scrollPending) return
+  scrollPending = true
   nextTick(() => {
-    if (chatBoxRef.value) {
-      chatBoxRef.value.scrollTop = chatBoxRef.value.scrollHeight
-    }
+    scrollPending = false
+    const el = chatBoxRef.value
+    if (!el) return
+    // 二次校验：等待 DOM 更新期间用户可能已上翻，此时不应再把视口拉回底部
+    if (!force && !autoFollow.value) return
+    el.scrollTop = el.scrollHeight
+    autoFollow.value = true
   })
+}
+
+/** 点击“回到最新”：回到底部并恢复自动跟随 */
+function jumpToBottom() {
+  autoFollow.value = true
+  scrollToBottom(true)
 }
 
 function formatTime(d?: string) {
@@ -338,6 +410,7 @@ function hideQuizAnswers(text: string): string {
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
+  background: linear-gradient(180deg, rgba(245, 243, 255, 0.45) 0%, rgba(255, 255, 255, 0) 40%);
 }
 .sidebar-header {
   padding: 16px;
@@ -351,7 +424,7 @@ function hideQuizAnswers(text: string): string {
   font-weight: 600;
   color: var(--color-muted-foreground);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.8px;
 }
 .conv-list {
   flex: 1;
@@ -366,11 +439,21 @@ function hideQuizAnswers(text: string): string {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  position: relative;
+  border: 1px solid transparent;
   transition: all var(--t-fast) var(--ease);
 }
-.conv-item:hover,
+.conv-item:hover {
+  background: var(--color-primary-50);
+}
 .conv-item.active {
   background: var(--color-primary-50);
+  border-color: var(--color-primary-100);
+  box-shadow: inset 3px 0 0 var(--color-primary);
+}
+.conv-item.active .title {
+  color: var(--color-primary-dark);
+  font-weight: 600;
 }
 .conv-item .title {
   font-size: 14px;
@@ -427,14 +510,28 @@ function hideQuizAnswers(text: string): string {
   line-height: 1.7;
   font-size: 14px;
   word-break: break-word;
+  animation: msg-in var(--t-normal) var(--ease-spring) both;
+}
+@keyframes msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 .msg.user {
-  background: var(--color-primary);
+  background: var(--gradient-primary);
   color: #fff;
   margin-left: auto;
   border-bottom-right-radius: var(--radius-sm);
+  box-shadow: var(--shadow-primary);
 }
-.msg.ai {
+/* AI 回复: 流式中(.ai) 与 历史消息(.assistant) 使用同一卡片样式 */
+.msg.ai,
+.msg.assistant {
   background: var(--color-muted);
   color: var(--color-foreground);
   border: 1px solid var(--color-border);
@@ -442,37 +539,107 @@ function hideQuizAnswers(text: string): string {
 }
 .msg.ai.typing .cursor {
   animation: blink 1s infinite;
+  color: var(--color-primary);
 }
 @keyframes blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
 }
 .welcome-msg {
+  position: relative;
   background: var(--color-card);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  padding: 48px 32px;
+  border-radius: var(--radius-xl);
+  padding: 56px 40px;
   text-align: center;
   align-self: center;
   margin: auto;
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+/* 欢迎区顶部渐变装饰条 */
+.welcome-msg::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background: var(--gradient-brand);
 }
 .welcome-msg h3 {
   margin-bottom: 8px;
-  font-size: 20px;
-  font-weight: 600;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
 }
 .welcome-msg p {
   color: var(--color-muted-foreground);
-  margin-bottom: 24px;
+  margin-bottom: 28px;
 }
 .quick-actions {
   display: flex;
   gap: 10px;
   justify-content: center;
+  flex-wrap: wrap;
+}
+.quick-actions :deep(.el-button) {
+  border-color: var(--color-primary-200);
+  color: var(--color-primary);
+  transition: all var(--t-normal) var(--ease);
+}
+.quick-actions :deep(.el-button:hover) {
+  background: var(--color-primary-50);
+  border-color: var(--color-primary);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(124, 58, 237, 0.18);
 }
 .input-area {
+  /* 作为“回到最新”悬浮按钮的定位锚点 */
+  position: relative;
   padding: 16px 24px;
   border-top: 1px solid var(--color-border);
+  background: linear-gradient(180deg, rgba(248, 248, 252, 0) 0%, rgba(245, 243, 255, 0.5) 100%);
+}
+/* 用户上翻阅读时的“回到最新”入口：悬浮在输入区上方，不遮挡消息内容 */
+.scroll-to-bottom {
+  position: absolute;
+  right: 24px;
+  bottom: calc(100% + 12px);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-card);
+  color: var(--color-primary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: var(--shadow-md);
+  transition: transform var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+}
+.scroll-to-bottom:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-lg);
+}
+.scroll-to-bottom:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+.scroll-to-bottom .el-icon {
+  font-size: 15px;
+}
+.fade-up-enter-active,
+.fade-up-leave-active {
+  transition: opacity var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
+}
+.fade-up-enter-from,
+.fade-up-leave-to {
+  opacity: 0;
+  transform: translateY(6px);
 }
 .input-row {
   display: flex;
@@ -482,6 +649,7 @@ function hideQuizAnswers(text: string): string {
 .input-row :deep(.el-textarea__inner) {
   min-height: 44px !important;
   max-height: 120px;
+  border-radius: 12px;
 }
 .input-hint {
   text-align: center;

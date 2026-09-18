@@ -24,6 +24,7 @@ import reactor.util.retry.Retry;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -208,11 +209,14 @@ public class ReviewAssistantAgent {
             // 检测是否为工具链请求（先...再...然后...）
             if (chainExecutor.isChainRequest(userMessage)) {
                 log.debug("[Agent] 识别到工具链请求: {}", userMessage);
-                String chainResponse = chainExecutor.executeChain(userMessage, convId, history);
+                ChainExecutor.ChainExecution execution = chainExecutor.execute(userMessage, convId, history);
+                String chainResponse = execution.text();
                 saveMessage(convId, "assistant", chainResponse, "CHAIN");
                 saveReviewRecord(convId, conversation != null ? conversation.getUserId() : null, userMessage, chainResponse);
                 saveAgentLog(convId, userMessage, "CHAIN", params, startTime, true, null);
                 agentMetrics.incrementToolCall("CHAIN");
+                // 链式请求中的计划步骤同样需要归档到学习计划板块
+                savePlansFromChain(execution.stepResults(), userId);
                 success = true;
                 return chainResponse;
             }
@@ -284,6 +288,39 @@ public class ReviewAssistantAgent {
     }
 
     /**
+     * 将工具链中的 PLAN 步骤结果归档到学习计划板块。
+     * <p>
+     * 链式请求（如“先总结……再出题……然后做个计划”）的意图会被记录为 CHAIN，
+     * 因此不会再走单意图的自动保存分支，需要在这里单独处理计划归档。
+     * </p>
+     *
+     * @param stepResults 工具链各步骤执行明细
+     * @param userId      用户 ID，为空时跳过归档
+     */
+    private void savePlansFromChain(List<ChainExecutor.ChainStepResult> stepResults, Integer userId) {
+        if (userId == null || stepResults == null || stepResults.isEmpty()) {
+            return;
+        }
+        for (ChainExecutor.ChainStepResult step : stepResults) {
+            if (!"PLAN".equals(step.intent()) || step.response() == null || step.response().isBlank()) {
+                continue;
+            }
+            try {
+                Map<String, String> stepParams = step.parameters();
+                String courseName = stepParams.getOrDefault("courseName", "未命名课程");
+                String availableDays = stepParams.getOrDefault("availableDays", "");
+                if (availableDays.isBlank()) {
+                    availableDays = "7天";
+                }
+                studyPlanService.savePlan(userId, courseName, availableDays, step.response());
+                log.debug("[Agent] 链式学习计划已保存: userId={}, courseName={}", userId, courseName);
+            } catch (Exception e) {
+                log.warn("[Agent] 保存链式学习计划失败: {}", e.getMessage());
+            }
+        }
+    }
+
+    /**
      * 兼容旧入口：不带会话 ID 时自动创建新会话。
      *
      * @param userMessage 用户输入消息
@@ -335,15 +372,30 @@ public class ReviewAssistantAgent {
             // 第一个 SSE 事件：发送会话元数据，前端据此绑定 conversationId
             Flux<String> metaFlux = Flux.just("{\"conversationId\":" + convId + "}");
 
-            // 检测是否为工具链请求（先...再...然后...）
+            // 检测是否为工具链请求（先...再...然后...）：逐步流式推送，避免多步串行等待超时
             if (chainExecutor.isChainRequest(userMessage)) {
                 log.debug("[Agent] 流式模式识别到工具链请求: {}", userMessage);
-                String chainResponse = chainExecutor.executeChain(userMessage, convId, history);
-                saveMessage(convId, "assistant", chainResponse, "CHAIN");
-                saveReviewRecord(convId, conversation != null ? conversation.getUserId() : null, userMessage, chainResponse);
-                saveAgentLog(convId, userMessage, "CHAIN", params, startTime, true, null);
+                final Integer chainConvId = convId;
+                final Conversation chainConversation = conversation;
+                final List<ChainExecutor.ChainStepResult> chainResults = new ArrayList<>();
+                StringBuilder chainBuffer = new StringBuilder();
+                Flux<String> chainFlux = chainExecutor
+                    .executeStream(userMessage, chainConvId, history, chainResults::addAll)
+                    .doOnNext(chainBuffer::append)
+                    .doOnComplete(() -> {
+                        String fullText = chainBuffer.toString();
+                        saveMessage(chainConvId, "assistant", fullText, "CHAIN");
+                        saveReviewRecord(chainConvId,
+                                chainConversation != null ? chainConversation.getUserId() : null,
+                                userMessage, fullText);
+                        saveAgentLog(chainConvId, userMessage, "CHAIN", null, startTime, true, null);
+                        // 链式请求中的计划步骤同样需要归档到学习计划板块
+                        savePlansFromChain(chainResults, userId);
+                    })
+                    // 多步串行耗时较长，给足超时时间并在超时后保留已生成内容
+                    .timeout(Duration.ofSeconds(300), Flux.just("\n\n[系统提示] 步骤响应超时，请稍后重试。"));
                 agentMetrics.incrementToolCall("CHAIN");
-                return Flux.concat(metaFlux, Flux.just(chainResponse));
+                return Flux.concat(metaFlux, chainFlux);
             }
 
             // 意图识别：复用统一入口

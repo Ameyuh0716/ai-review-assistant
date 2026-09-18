@@ -12,12 +12,15 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.Charset;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 
@@ -34,6 +37,12 @@ import java.util.UUID;
 @Slf4j
 @Service
 public class DocumentServiceImpl implements DocumentService {
+
+    /** 中间分块保留的最小字符数（低于该值的碎片会被合并丢弃） */
+    private static final int MIN_CHUNK_LENGTH = 10;
+
+    /** 单个分块的目标最大字符数 */
+    private static final int MAX_CHUNK_LENGTH = 500;
 
     private final VectorStore vectorStore;
     private final CoursesService coursesService;
@@ -104,13 +113,15 @@ public class DocumentServiceImpl implements DocumentService {
         }
 
         // 批量构建 Spring AI Document，并附加课程与分片元数据
+        // 已有分块数用于续接序号，支持对同一课程多次导入而不产生序号冲突
+        int baseIndex = (int) countChunks(courseId);
         List<Document> documents = new ArrayList<>();
         for (int i = 0; i < chunks.size(); i++) {
             String chunk = chunks.get(i);
             Map<String, Object> metadata = new HashMap<>();
             metadata.put("courseId", courseId);
-            metadata.put("chunkIndex", i);
-            metadata.put("chunkTotal", chunks.size());
+            metadata.put("chunkIndex", baseIndex + i);
+            metadata.put("chunkTotal", baseIndex + chunks.size());
             documents.add(new Document(chunk, metadata));
         }
 
@@ -129,8 +140,8 @@ public class DocumentServiceImpl implements DocumentService {
      * <p>
      * 规则说明：
      * - 段落级聚合可保持语义完整性；
-     * - 当追加新段落会超过 500 字符时，保存当前块（至少 50 字符才保留，避免碎片）；
-     * - 最后剩余内容若大于 50 字符也作为一块；
+     * - 当追加新段落会超过 500 字符时，保存当前块（至少 {@value #MIN_CHUNK_LENGTH} 字符才保留，避免碎片）；
+     * - 最后剩余内容非空即保留为一块（支持短文本导入）；
      * - 整体限制最多 50 个块，防止超长文档占用过多向量空间。
      * </p>
      *
@@ -153,9 +164,9 @@ public class DocumentServiceImpl implements DocumentService {
                 continue;
             }
 
-            // 如果当前块加上新段落超过 500 字符，且当前块已积累足够内容，则保存当前块
-            if (currentChunk.length() + paragraph.length() > 500) {
-                if (currentChunk.length() > 50) {
+            // 如果当前块加上新段落超过上限，且当前块已积累足够内容，则保存当前块
+            if (currentChunk.length() + paragraph.length() > MAX_CHUNK_LENGTH) {
+                if (currentChunk.length() > MIN_CHUNK_LENGTH) {
                     chunks.add(currentChunk.toString());
                 }
                 currentChunk = new StringBuilder();
@@ -168,9 +179,10 @@ public class DocumentServiceImpl implements DocumentService {
             currentChunk.append(paragraph);
         }
 
-        // 添加最后一个块
-        if (currentChunk.length() > 50) {
-            chunks.add(currentChunk.toString());
+        // 添加最后一个块：非空即保留（短文本片段同样可导入）
+        String tail = currentChunk.toString().trim();
+        if (!tail.isEmpty()) {
+            chunks.add(tail);
         }
 
         // 限制最多 50 个块，避免向量库记录过大
@@ -183,6 +195,10 @@ public class DocumentServiceImpl implements DocumentService {
 
     /**
      * 根据文件扩展名选择对应的解析器读取内容。
+     * <p>
+     * 采用扩展名而非 MIME 类型判断：浏览器上报的 MIME 在部分系统下会缺失（例如 macOS
+     * 上传 .md 时 file.type 可能为空字符串），扩展名判断更稳定；中文文件名不影响判断。
+     * </p>
      *
      * @param file 上传的多媒体文件
      * @return 文件解析后的纯文本内容
@@ -190,40 +206,78 @@ public class DocumentServiceImpl implements DocumentService {
      */
     private String readFileContent(MultipartFile file) throws Exception {
         String filename = file.getOriginalFilename();
-        if (filename == null) {
+        if (filename == null || filename.isBlank()) {
             throw new IllegalArgumentException("文件名不能为空");
         }
-        String lowerName = filename.toLowerCase();
+        // 部分客户端会把完整路径放进文件名，这里只取最后一段；
+        // 转小写必须指定 Locale.ROOT，否则在土耳其语等区域设置下字母映射会被改变
+        int slash = Math.max(filename.lastIndexOf('/'), filename.lastIndexOf('\\'));
+        String baseName = (slash >= 0 ? filename.substring(slash + 1) : filename).toLowerCase(Locale.ROOT);
 
-        if (lowerName.endsWith(".pdf")) {
+        if (baseName.endsWith(".pdf")) {
             return readPdfContent(file);
         }
-        if (lowerName.endsWith(".doc") || lowerName.endsWith(".docx")) {
+        if (baseName.endsWith(".docx")) {
             return readWordContent(file);
         }
-        if (lowerName.endsWith(".txt") || lowerName.endsWith(".md")) {
+        if (baseName.endsWith(".doc")) {
+            // Apache POI 的 XWPFDocument 只能解析 OOXML(.docx)，
+            // 旧版二进制 .doc 会直接解析失败，这里给出可操作的提示而非泛化的读取失败
+            throw new IllegalArgumentException("暂不支持旧版 .doc 格式，请用 Word 另存为 .docx 后重新上传");
+        }
+        if (baseName.endsWith(".txt") || baseName.endsWith(".md") || baseName.endsWith(".markdown")) {
             return readTextContent(file);
         }
-        throw new IllegalArgumentException("仅支持 txt、md、pdf、doc、docx 格式文件");
+        throw new IllegalArgumentException("仅支持 txt、md、markdown、pdf、docx 格式文件");
     }
 
     /**
-     * 读取 txt / md 等纯文本文件内容，按 UTF-8 编码逐行读取。
+     * 读取 txt / md 等纯文本文件内容。
+     * <p>
+     * 优先按 UTF-8 严格解码；若字节序列不是合法 UTF-8（典型场景是 Windows 记事本保存的
+     * GBK/GB2312 中文文件），则回退用 GB18030 解码，避免整篇内容存成乱码。
+     * </p>
      *
      * @param file 上传的文本文件
      * @return 文件文本内容
      * @throws Exception IO 异常时抛出
      */
     private String readTextContent(MultipartFile file) throws Exception {
-        StringBuilder content = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(file.getInputStream(), StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                content.append(line).append("\n");
-            }
+        byte[] bytes = file.getBytes();
+
+        // 跳过 UTF-8 BOM，否则首行会多出不可见字符
+        int offset = 0;
+        if (bytes.length >= 3
+                && (bytes[0] & 0xFF) == 0xEF
+                && (bytes[1] & 0xFF) == 0xBB
+                && (bytes[2] & 0xFF) == 0xBF) {
+            offset = 3;
         }
-        return content.toString();
+
+        String text = decodeText(bytes, offset);
+        // 统一换行符，保证分块结果稳定（与原逐行读取行为一致）
+        return text.replace("\r\n", "\n").replace('\r', '\n');
+    }
+
+    /**
+     * 将字节数组解码为文本，UTF-8 优先，失败时回退 GB18030。
+     *
+     * @param bytes  原始字节
+     * @param offset 起始偏移（用于跳过 BOM）
+     * @return 解码后的文本
+     */
+    private String decodeText(byte[] bytes, int offset) {
+        ByteBuffer buffer = ByteBuffer.wrap(bytes, offset, bytes.length - offset);
+        try {
+            return StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(buffer)
+                    .toString();
+        } catch (CharacterCodingException e) {
+            log.warn("文件不是合法 UTF-8 编码，回退使用 GB18030 解码");
+            return new String(bytes, offset, bytes.length - offset, Charset.forName("GB18030"));
+        }
     }
 
     /**

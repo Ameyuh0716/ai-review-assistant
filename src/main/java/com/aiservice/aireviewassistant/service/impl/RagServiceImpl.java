@@ -13,6 +13,7 @@ import org.springframework.ai.document.Document;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.cache.annotation.Cacheable;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 
@@ -45,21 +46,25 @@ public class RagServiceImpl implements RagService {
     private final AgentMetrics agentMetrics;
     private final ObjectMapper objectMapper;
 
+    /** JDBC 模板，用于向量检索零命中时按关键词直接检索知识库内容。 */
+    private final JdbcTemplate jdbcTemplate;
+
     /**
      * 构造方法：注入 RAG 所需的大模型客户端、向量库、提示词模板、检索日志服务等依赖。
      *
-     * @param chatClient         Spring AI 大模型聊天客户端
-     * @param vectorStore        向量存储（PgVectorStore），用于相似度检索
-     * @param promptTemplate     提示词模板渲染器
+     * @param chatClient          Spring AI 大模型聊天客户端
+     * @param vectorStore         向量存储（PgVectorStore），用于相似度检索
+     * @param promptTemplate      提示词模板渲染器
      * @param ragSearchLogService RAG 检索日志服务，用于持久化检索与调用日志
-     * @param ragProperties      RAG 配置属性（TopK、阈值、重排序开关等）
+     * @param ragProperties       RAG 配置属性（TopK、阈值、重排序开关等）
      * @param agentMetrics        Agent 调用指标收集器
-     * @param objectMapper       JSON 序列化工具，用于记录检索片段
+     * @param objectMapper        JSON 序列化工具，用于记录检索片段
+     * @param jdbcTemplate        JDBC 模板，用于关键词兜底检索
      */
     public RagServiceImpl(ChatClient chatClient, VectorStore vectorStore,
                           PromptTemplate promptTemplate, RagSearchLogService ragSearchLogService,
                           RagProperties ragProperties, AgentMetrics agentMetrics,
-                          ObjectMapper objectMapper) {
+                          ObjectMapper objectMapper, JdbcTemplate jdbcTemplate) {
         this.chatClient = chatClient;
         this.vectorStore = vectorStore;
         this.promptTemplate = promptTemplate;
@@ -67,6 +72,7 @@ public class RagServiceImpl implements RagService {
         this.ragProperties = ragProperties;
         this.agentMetrics = agentMetrics;
         this.objectMapper = objectMapper;
+        this.jdbcTemplate = jdbcTemplate;
     }
 
     /**
@@ -192,6 +198,17 @@ public class RagServiceImpl implements RagService {
                 log.debug("重排序后文档数: {}", docs.size());
             }
 
+            // 向量检索零命中时的关键词兜底：
+            // 用户只给出宽泛学科名（如"操作系统"）时，查询向量与内容向量的余弦相似度
+            // 可能低于阈值，但知识库中确实存在该学科资料。此处按关键词直接匹配内容，
+            // 避免下游工具拿到空上下文后误报"知识库中暂无相关内容"。
+            if (docs.isEmpty()) {
+                docs = keywordFallbackSearch(question, topK);
+                if (!docs.isEmpty()) {
+                    log.debug("向量检索零命中，关键词兜底召回 {} 篇", docs.size());
+                }
+            }
+
             // 构建供日志记录的 JSON 片段与供模型使用的拼接上下文
             List<Map<String, Object>> chunks = new ArrayList<>();
             StringBuilder contextBuilder = new StringBuilder();
@@ -272,6 +289,58 @@ public class RagServiceImpl implements RagService {
             .limit(topK)
             .map(ScoredDocument::doc)
             .toList();
+    }
+
+    /**
+     * 关键词兜底检索：向量检索零命中时，按关键词直接匹配知识库内容。
+     * <p>
+     * 仅在向量检索完全无结果时触发，因此不会影响正常语义检索的精度；
+     * 按关键词长度降序尝试（越长的词越具体），命中任意一个词即返回，避免召回过多无关片段。
+     * </p>
+     *
+     * @param question 用户查询
+     * @param limit    最多返回的片段数
+     * @return 匹配到的文档列表；无匹配时返回空列表
+     */
+    private List<Document> keywordFallbackSearch(String question, int limit) {
+        List<String> keywords = extractKeywords(question);
+        for (String keyword : keywords) {
+            String sql = "SELECT id, content FROM vector_store WHERE content ILIKE ? LIMIT ?";
+            List<Document> matched = jdbcTemplate.query(sql,
+                (rs, rowNum) -> new Document(rs.getString("id"), rs.getString("content"), Map.of()),
+                "%" + keyword + "%", limit);
+            if (!matched.isEmpty()) {
+                return matched;
+            }
+        }
+        return List.of();
+    }
+
+    /**
+     * 从查询文本中提取候选关键词，按长度降序排列。
+     * <p>
+     * 先剔除标点与常见疑问词，再按空白切分；仅保留长度大于 1 的词（过滤单字噪声）。
+     * </p>
+     *
+     * @param question 用户查询
+     * @return 候选关键词列表
+     */
+    private List<String> extractKeywords(String question) {
+        if (question == null || question.isBlank()) {
+            return List.of();
+        }
+        String cleaned = question
+            .replaceAll("[^\\u4e00-\\u9fa5a-zA-Z0-9]", " ")
+            .replaceAll("什么是|请问|怎么|如何|为什么|解释一下|介绍一下|的|了|吗|呢", " ")
+            .toLowerCase();
+        List<String> keywords = new ArrayList<>();
+        for (String part : cleaned.split("\\s+")) {
+            if (part.length() > 1) {
+                keywords.add(part);
+            }
+        }
+        keywords.sort(Comparator.comparingInt(String::length).reversed());
+        return keywords;
     }
 
     /**

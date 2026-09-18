@@ -1,8 +1,5 @@
-version: '3.8'
-
-# 项目默认使用 Docker 中的 PostgreSQL + pgvector
-# 确保本地没有其他 PostgreSQL 占用 5432 端口
-# 如果有: brew services stop postgresql@16
+# 项目统一使用 Docker 中的 PostgreSQL + pgvector（本机已卸载 Homebrew PostgreSQL）
+# 唯一数据库入口: 127.0.0.1:5432（仅绑定 localhost，不暴露外网）
 
 services:
   postgres:

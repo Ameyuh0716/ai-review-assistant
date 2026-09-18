@@ -14,10 +14,9 @@
         <el-upload
           v-if="selectedCourseId"
           :action="uploadAction"
-          :headers="uploadHeaders"
-          :data="{ courseId: selectedCourseId }"
           :show-file-list="false"
           :before-upload="beforeUpload"
+          :http-request="customUpload"
           :on-success="handleUploadSuccess"
           :on-error="handleUploadError"
         >
@@ -37,13 +36,16 @@
       </div>
 
       <el-table :data="chunks" v-loading="loading" stripe>
-        <el-table-column type="index" width="60" />
+        <el-table-column label="分块序号" width="100">
+          <template #default="{ row }">
+            {{ (row.chunkIndex ?? 0) + 1 }} / {{ row.chunkTotal ?? 1 }}
+          </template>
+        </el-table-column>
         <el-table-column label="内容" min-width="300">
           <template #default="{ row }">
             <div class="chunk-content">{{ row.content }}</div>
           </template>
         </el-table-column>
-        <el-table-column prop="metadata.chunkIndex" label="分块序号" width="100" />
       </el-table>
 
       <el-pagination
@@ -67,12 +69,11 @@ import AppLayout from '@/components/AppLayout.vue'
 import * as courseApi from '@/api/course'
 import * as knowledgeApi from '@/api/knowledge'
 import type { Course } from '@/api/course'
-import type { DocumentChunk } from '@/api/knowledge'
+import type { DocumentChunk, UploadResult } from '@/api/knowledge'
 import { Upload, Delete } from '@element-plus/icons-vue'
-import { useAuthStore } from '@/stores/auth'
+import type { UploadRequestOptions } from 'element-plus'
 
 const route = useRoute()
-const authStore = useAuthStore()
 
 const courses = ref<Course[]>([])
 const selectedCourseId = ref<number | undefined>(undefined)
@@ -84,9 +85,6 @@ const size = ref(10)
 const loading = ref(false)
 
 const uploadAction = computed(() => `${import.meta.env.VITE_API_BASE_URL || ''}/api/document/upload`)
-const uploadHeaders = computed(() => ({
-  Authorization: `Bearer ${authStore.token || ''}`
-}))
 
 onMounted(() => {
   loadCourses()
@@ -138,26 +136,79 @@ async function loadCount() {
 }
 
 function beforeUpload(file: File) {
-  const allowed = ['text/plain', 'text/markdown', 'application/pdf', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document']
-  if (!allowed.includes(file.type)) {
-    ElMessage.error('仅支持 txt、md、pdf、docx 格式')
+  // 按扩展名校验：部分系统/浏览器下 file.type 为空字符串（例如 macOS 的 .md），
+  // 用 MIME 白名单会把正常文件误判为不支持格式
+  const name = (file.name || '').toLowerCase()
+  const supported = knowledgeApi.ALLOWED_UPLOAD_EXTENSIONS.some(ext => name.endsWith(ext))
+  if (!supported) {
+    ElMessage.error(`仅支持 ${knowledgeApi.ALLOWED_UPLOAD_EXTENSIONS.join('、')} 格式`)
     return false
   }
-  if (file.size > 20 * 1024 * 1024) {
-    ElMessage.error('文件大小不能超过 20MB')
+  // 与后端 multipart 限制保持一致，避免大文件传到一半才被拒绝
+  if (file.size > knowledgeApi.MAX_UPLOAD_SIZE) {
+    const limit = knowledgeApi.MAX_UPLOAD_SIZE / 1024 / 1024
+    ElMessage.error(`文件大小不能超过 ${limit}MB（当前 ${(file.size / 1024 / 1024).toFixed(1)}MB）`)
     return false
   }
   return true
 }
 
-function handleUploadSuccess() {
-  ElMessage.success('上传成功')
+/**
+ * 自定义上传：走项目统一的 axios 实例，
+ * 从而复用登录态自动刷新与后端返回的具体错误信息。
+ */
+async function customUpload(options: UploadRequestOptions) {
+  const courseId = selectedCourseId.value
+  if (!courseId) {
+    options.onError(toUploadError(new Error('请先选择课程')))
+    return
+  }
+  try {
+    const res = await knowledgeApi.uploadDocument(courseId, options.file)
+    options.onSuccess(res)
+  } catch (e) {
+    options.onError(toUploadError(e))
+  }
+}
+
+/** Element Plus 期望的上传错误对象类型（onError 的参数） */
+type UploadError = Parameters<UploadRequestOptions['onError']>[0]
+
+/**
+ * 把 axios 错误补全为 Element Plus 期望的上传错误对象。
+ * 直接复用原对象（仅补齐缺少的字段），从而保留 response，
+ * 便于后续提取后端返回的具体失败原因。
+ */
+function toUploadError(err: unknown): UploadError {
+  const e = (err instanceof Error ? err : new Error(String(err))) as UploadError
+  const status = (err as { response?: { status?: number } })?.response?.status
+  e.status = typeof status === 'number' ? status : 0
+  e.method = 'post'
+  e.url = uploadAction.value
+  return e
+}
+
+function handleUploadSuccess(response: UploadResult) {
+  ElMessage.success(response?.message || '上传成功')
   loadChunks()
   loadCount()
 }
 
-function handleUploadError() {
-  ElMessage.error('上传失败')
+/** 从错误对象中提取后端返回的具体原因，避免用户只看到一句无法排查的“上传失败” */
+function extractErrorMessage(err: unknown): string {
+  const e = err as {
+    response?: { status?: number; data?: { message?: string } }
+    message?: string
+  }
+  const status = e?.response?.status
+  if (status === 401 || status === 403) {
+    return '登录已过期，请重新登录后重试'
+  }
+  return e?.response?.data?.message || e?.message || '上传失败，请稍后重试'
+}
+
+function handleUploadError(err: unknown) {
+  ElMessage.error(extractErrorMessage(err))
 }
 
 async function clearKnowledge() {
@@ -186,8 +237,9 @@ async function clearKnowledge() {
 }
 .page-header h2 {
   margin: 0;
-  font-size: 22px;
+  font-size: 24px;
   font-weight: 700;
+  letter-spacing: -0.5px;
 }
 .header-actions {
   display: flex;
