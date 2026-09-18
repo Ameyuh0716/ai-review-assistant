@@ -1,0 +1,1 @@
+import{z as r,aS as u,A as t,B as o}from"./index-B5FTYduN.js";function n(){return r("/api/courses")}function c(s){return t("/api/courses",s)}function i(s,e){return u(`/api/courses/${s}`,e)}function p(s){return o(`/api/courses/${s}`)}export{c,p as d,n as l,i as u};

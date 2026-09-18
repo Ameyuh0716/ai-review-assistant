@@ -47,10 +47,17 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
-        // 从请求头中获取原始 Authorization 值
+        // 优先从请求头获取 Token；EventSource 等场景无法自定义 header，允许通过 token query 参数传递
         String authHeader = request.getHeader(jwtProperties.getHeaderName());
-        // 按 Bearer 协议提取 Token，若格式非法则返回 null
         String token = jwtProperties.extractToken(authHeader);
+        if (token == null) {
+            String tokenParam = request.getParameter("token");
+            if (tokenParam != null && !tokenParam.isBlank()) {
+                // query 参数兼容两种格式: 裸 token 或 "Bearer xxx"
+                String extracted = jwtProperties.extractToken(tokenParam);
+                token = extracted != null ? extracted : tokenParam.trim();
+            }
+        }
 
         // 仅当 Token 存在、有效且为 access token 时才建立认证上下文
         if (token != null) {

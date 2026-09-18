@@ -45,9 +45,7 @@ public class AgentMetrics {
 
     /**
      * 记录 Agent 请求总数。
-     * <p>
      * 按请求意图与成功/失败状态打标签，便于统计不同意图的调用量与成功率。
-     * </p>
      *
      * @param intent  用户请求意图，为空时使用 {@code UNKNOWN}
      * @param success 是否成功

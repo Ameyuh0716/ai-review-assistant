@@ -1,0 +1,259 @@
+/* AI Review Assistant — Vue Design System
+   Based on ui-ux-pro-max: Education "Flashcard & Study Tool" palette
+   + Minimalism & Swiss Style
+   ============================================================
+   设计意图: 简洁典雅 (紫罗兰主色 + 克制留白) × 有活力 (翠绿点缀 + 柔和渐变)
+   Primary: #7C3AED (elegant violet)   Accent: #059669 (vibrant emerald)
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+
+:root {
+  /* ---------- Primary (典雅紫罗兰) ---------- */
+  --color-primary: #7C3AED;
+  --color-primary-dark: #632EBE;
+  --color-primary-light: #8B5CF6;
+  --color-primary-50: #F5F3FF;
+  --color-primary-100: #EDE9FE;
+  --color-primary-200: #DDD6FE;
+
+  /* ---------- Accent (活力翠绿) ---------- */
+  --color-accent: #059669;
+  --color-accent-light: #10B981;
+  --color-accent-50: #ECFDF5;
+  --color-accent-100: #D1FAE5;
+
+  /* ---------- Semantic ---------- */
+  --color-success: #059669;
+  --color-success-light: #D1FAE5;
+  --color-danger: #DC2626;
+  --color-danger-light: #FEE2E2;
+  --color-warning: #D97706;
+  --color-warning-light: #FEF3C7;
+
+  /* ---------- Neutrals ---------- */
+  --color-background: #F8F8FC;
+  --color-foreground: #1E1B31;
+  --color-card: #FFFFFF;
+  --color-muted: #F4F3F9;
+  --color-muted-foreground: #5B5772;
+  --color-border: #E8E6F0;
+
+  /* ---------- Gradients (活力渐变) ---------- */
+  --gradient-primary: linear-gradient(135deg, #7C3AED 0%, #9F67F5 100%);
+  --gradient-accent: linear-gradient(135deg, #059669 0%, #34D399 100%);
+  --gradient-hero: linear-gradient(135deg, #F5F3FF 0%, #F8F8FC 45%, #ECFDF5 100%);
+  --gradient-brand: linear-gradient(135deg, #7C3AED 0%, #A78BFA 55%, #34D399 130%);
+
+  /* ---------- Elevation (典雅阴影) ---------- */
+  --shadow-xs: 0 1px 2px rgba(30, 27, 49, 0.04);
+  --shadow-sm: 0 2px 8px rgba(30, 27, 49, 0.05), 0 1px 2px rgba(30, 27, 49, 0.04);
+  --shadow-md: 0 8px 24px rgba(30, 27, 49, 0.07), 0 2px 6px rgba(30, 27, 49, 0.04);
+  --shadow-lg: 0 20px 48px rgba(30, 27, 49, 0.10), 0 4px 12px rgba(30, 27, 49, 0.05);
+  --shadow-primary: 0 8px 20px rgba(124, 58, 237, 0.28);
+  --shadow-primary-lg: 0 12px 28px rgba(124, 58, 237, 0.34);
+
+  /* ---------- Layout ---------- */
+  --navbar-height: 64px;
+  --sidebar-width: 280px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+
+  /* ---------- Motion ---------- */
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --t-fast: 150ms;
+  --t-normal: 250ms;
+  --t-slow: 350ms;
+
+  /* ---------- Element Plus 主题覆写 ---------- */
+  --el-color-primary: #7C3AED;
+  --el-color-primary-light-3: #A375F2;
+  --el-color-primary-light-5: #BE9DF6;
+  --el-color-primary-light-7: #D8C4FA;
+  --el-color-primary-light-8: #E5D8FB;
+  --el-color-primary-light-9: #F2EBFD;
+  --el-color-primary-dark-2: #632EBE;
+  --el-color-success: #059669;
+  --el-border-radius-base: 10px;
+  --el-border-radius-small: 8px;
+  --el-font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+}
+
+/* ============================================================
+   基础元素
+   ============================================================ */
+* {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16px;
+}
+
+body {
+  margin: 0;
+  font-family: var(--el-font-family);
+  background: var(--color-background);
+  color: var(--color-foreground);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+::selection {
+  background: var(--color-primary-200);
+  color: var(--color-primary-dark);
+}
+
+/* 典雅细滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #D5D2E3;
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-primary-light);
+  background-clip: content-box;
+  border: 2px solid transparent;
+}
+
+/* 键盘可达性: 可见焦点环 */
+:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+a {
+  text-decoration: none;
+  color: inherit;
+}
+
+/* ============================================================
+   Element Plus 全局精修
+   ============================================================ */
+
+/* --- 卡片: 轻阴影 + 悬停浮起 --- */
+.el-card {
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-border);
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow var(--t-normal) var(--ease), transform var(--t-normal) var(--ease);
+}
+.el-card:hover {
+  box-shadow: var(--shadow-md);
+}
+
+/* --- 主按钮: 渐变 + 活力阴影 + 悬停微浮 --- */
+.el-button {
+  font-weight: 500;
+  border-radius: 10px;
+  transition: all var(--t-fast) var(--ease);
+}
+.el-button--primary {
+  background: var(--gradient-primary);
+  border: none;
+  box-shadow: var(--shadow-primary);
+}
+.el-button--primary:hover,
+.el-button--primary:focus {
+  background: var(--gradient-primary);
+  filter: brightness(1.06);
+  box-shadow: var(--shadow-primary-lg);
+  transform: translateY(-1px);
+}
+.el-button--primary:active {
+  transform: translateY(0);
+  filter: brightness(0.98);
+}
+.el-button--primary.is-disabled,
+.el-button--primary.is-disabled:hover {
+  background: var(--gradient-primary);
+  opacity: 0.5;
+  box-shadow: none;
+  transform: none;
+  filter: none;
+}
+.el-button--success {
+  box-shadow: 0 6px 16px rgba(5, 150, 105, 0.24);
+}
+.el-button--large {
+  border-radius: 12px;
+}
+
+/* --- 输入框: 柔和聚焦环 --- */
+.el-input__wrapper,
+.el-textarea__inner {
+  border-radius: 10px;
+  transition: box-shadow var(--t-fast) var(--ease);
+}
+.el-textarea__inner:focus {
+  box-shadow: 0 0 0 1px var(--color-primary) inset,
+    0 0 0 4px var(--color-primary-50) !important;
+}
+
+/* --- 对话框 / 弹层 --- */
+.el-dialog {
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}
+.el-message-box {
+  border-radius: var(--radius-lg);
+}
+
+/* --- 标签 --- */
+.el-tag {
+  border-radius: 6px;
+  font-weight: 500;
+}
+
+/* --- 统计数字 --- */
+.el-statistic__number {
+  font-weight: 700;
+  letter-spacing: -0.5px;
+}
+
+/* --- Tabs --- */
+.el-tabs__item {
+  font-weight: 500;
+}
+
+/* --- 分页 --- */
+.el-pagination.is-background .el-pager li {
+  border-radius: 8px;
+}
+
+/* --- 空状态 --- */
+.el-empty__description p {
+  color: var(--color-muted-foreground);
+}
+
+/* ============================================================
+   动效无障碍: 尊重系统减弱动效设置
+   ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -182,8 +182,8 @@ public class QuizTool implements AgentTool {
         if (digitMatcher.find()) {
             return clampCount(Integer.parseInt(digitMatcher.group(1)));
         }
-        // 匹配中文数字，如"三道题"
-        Matcher cnMatcher = Pattern.compile("([一二两三四五六七八九十]+)\\s*[道个题]").matcher(message);
+        // 匹配中文数字，如"三道题"；不匹配量词"个"，避免把"设计一个计划"里的"一个"误读成 1 道题
+        Matcher cnMatcher = Pattern.compile("([一二两三四五六七八九十]+)\\s*[道题]").matcher(message);
         if (cnMatcher.find()) {
             return clampCount(chineseToNumber(cnMatcher.group(1)));
         }

@@ -11,8 +11,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Prompt 模板加载与渲染工具类。
- * <p>支持从 classpath 的 {@code prompts/} 目录读取模板文件，并使用 {@code {{key}}} 占位符替换变量。
- * 模板内容会被缓存，避免每次重复读取文件。</p>
+ * 支持从 classpath 的 {@code prompts/} 目录读取模板文件，并使用 {@code {{key}}} 占位符替换变量
+ * 模板内容会被缓存 避免每次重复读取文件
  */
 @Component
 public class PromptTemplate {

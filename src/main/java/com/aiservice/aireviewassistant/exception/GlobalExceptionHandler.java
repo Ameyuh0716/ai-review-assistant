@@ -12,6 +12,7 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.util.stream.Collectors;
@@ -133,6 +134,23 @@ public class GlobalExceptionHandler {
     public ApiResponse<Void> handleNoResourceFound(NoResourceFoundException e) {
         log.warn("资源未找到: {}", e.getMessage());
         return ApiResponse.error(404, "请求的资源不存在");
+    }
+
+    /**
+     * 处理上传文件超出大小限制。
+     * <p>
+     * 该异常在 Multipart 解析阶段抛出（早于 Controller 执行），若不单独处理会被兜底为
+     * “系统繁忙，请稍后再试”，用户无法得知真实原因。此处返回可操作的提示。
+     * </p>
+     *
+     * @param e {@link MaxUploadSizeExceededException}
+     * @return 400 提示文件过大
+     */
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    public ApiResponse<Void> handleMaxUploadSizeExceeded(MaxUploadSizeExceededException e) {
+        log.warn("上传文件超出大小限制: {}", e.getMessage());
+        return ApiResponse.error(400, "文件过大，单个文件不能超过 10MB");
     }
 
     /**

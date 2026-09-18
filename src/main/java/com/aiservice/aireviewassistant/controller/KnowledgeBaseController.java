@@ -1,5 +1,6 @@
 package com.aiservice.aireviewassistant.controller;
 
+import com.aiservice.aireviewassistant.common.ApiResponse;
 import com.aiservice.aireviewassistant.dto.KnowledgeChunkDto;
 import com.aiservice.aireviewassistant.service.DocumentService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -42,7 +43,7 @@ public class KnowledgeBaseController {
      */
     @Operation(summary = "查询课程下的向量分块")
     @GetMapping("/{courseId}/chunks")
-    public Map<String, Object> listChunks(
+    public ApiResponse<Map<String, Object>> listChunks(
             @PathVariable Integer courseId,
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "20") int pageSize) {
@@ -58,7 +59,7 @@ public class KnowledgeBaseController {
         result.put("page", page);
         result.put("pageSize", pageSize);
         result.put("totalPages", (total + pageSize - 1) / pageSize);
-        return result;
+        return ApiResponse.success(result);
     }
 
     /**
@@ -70,10 +71,10 @@ public class KnowledgeBaseController {
      */
     @Operation(summary = "统计课程下的向量分块数量")
     @GetMapping("/{courseId}/count")
-    public Map<String, Long> countChunks(@PathVariable Integer courseId) {
+    public ApiResponse<Map<String, Long>> countChunks(@PathVariable Integer courseId) {
         Map<String, Long> result = new HashMap<>();
         result.put("count", documentService.countChunks(courseId));
-        return result;
+        return ApiResponse.success(result);
     }
 
     /**
@@ -85,11 +86,11 @@ public class KnowledgeBaseController {
      */
     @Operation(summary = "删除课程下的所有向量分块")
     @DeleteMapping("/{courseId}")
-    public Map<String, Object> deleteChunks(@PathVariable Integer courseId) {
+    public ApiResponse<Map<String, Object>> deleteChunks(@PathVariable Integer courseId) {
         int deleted = documentService.deleteChunksByCourseId(courseId);
         Map<String, Object> result = new HashMap<>();
         result.put("deleted", deleted);
         result.put("success", true);
-        return result;
+        return ApiResponse.success(result);
     }
 }

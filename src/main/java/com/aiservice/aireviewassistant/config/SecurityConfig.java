@@ -55,9 +55,10 @@ public class SecurityConfig {
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .addFilterBefore(new JwtAuthenticationFilter(jwtProperties), UsernamePasswordAuthenticationFilter.class)
             .authorizeHttpRequests(auth -> auth
-                // 公开静态资源、首页
-                .requestMatchers("/", "/index.html", "/static/**", "/css/**", "/*.html").permitAll()
+                // 公开 Vue 构建产物、静态资源、前端路由 fallback
+                .requestMatchers("/", "/index.html", "/static/**", "/assets/**", "/css/**", "/js/**", "/favicon.svg", "/login", "/courses", "/knowledge", "/quiz", "/plan", "/stats").permitAll()
                 // 公开认证接口（注册/登录/刷新Token）
+                // 注意：/api/auth/me 需要认证，Token 过期时返回 401 触发前端自动刷新
                 .requestMatchers("/api/auth/login", "/api/auth/register", "/api/auth/refresh").permitAll()
                 // 公开 Swagger / OpenAPI
                 .requestMatchers("/swagger-ui/**", "/v3/api-docs/**", "/webjars/**").permitAll()
@@ -65,10 +66,18 @@ public class SecurityConfig {
                 .requestMatchers("/actuator/health").permitAll()
                 // 需要 ADMIN 角色
                 .requestMatchers("/actuator/**").hasRole("ADMIN")
-                // 对话和课程接口允许匿名（登录后自动关联用户）
-                .requestMatchers("/api/agent/**", "/api/conversations/**").permitAll()
+                // 对话接口允许匿名（登录后自动关联用户）
+                .requestMatchers("/api/agent/**", "/api/conversations/**", "/api/messages").permitAll()
                 // 默认：所有其他请求需要认证
                 .anyRequest().authenticated()
+            )
+            // 未认证统一返回 401（而非默认 403），前端据此触发 Token 刷新流程
+            .exceptionHandling(ex -> ex
+                .authenticationEntryPoint((request, response, authException) -> {
+                    response.setStatus(jakarta.servlet.http.HttpServletResponse.SC_UNAUTHORIZED);
+                    response.setContentType("application/json;charset=UTF-8");
+                    response.getWriter().write("{\"code\":401,\"message\":\"未登录或登录已过期\",\"data\":null}");
+                })
             );
         return http.build();
     }

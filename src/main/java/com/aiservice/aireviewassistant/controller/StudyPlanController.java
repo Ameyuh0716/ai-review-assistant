@@ -1,11 +1,11 @@
 package com.aiservice.aireviewassistant.controller;
 
 import com.aiservice.aireviewassistant.common.ApiResponse;
+import com.aiservice.aireviewassistant.dto.SavePlanRequest;
 import com.aiservice.aireviewassistant.entity.StudyPlan;
 import com.aiservice.aireviewassistant.service.StudyPlanService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
-import jakarta.validation.constraints.NotBlank;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
@@ -35,22 +35,19 @@ public class StudyPlanController {
 
     /**
      * 保存学习计划。
-     * <p>POST /api/plans</p>
+     * <p>POST /api/plans，请求体：{@code {"courseName":"计算机网络","availableDays":"7天","content":"..."}}</p>
      *
-     * @param courseName 课程名称
-     * @param availableDays 可用天数
-     * @param content 计划内容
+     * @param request 保存计划请求（课程名称、可用天数、计划正文）
      * @param currentUserId 当前用户 ID
      * @return 保存后的学习计划
      */
     @Operation(summary = "保存学习计划")
     @PostMapping
     public ApiResponse<StudyPlan> savePlan(
-            @RequestParam("courseName") @NotBlank(message = "课程名称不能为空") String courseName,
-            @RequestParam("availableDays") @NotBlank(message = "可用天数不能为空") String availableDays,
-            @RequestBody @NotBlank(message = "计划内容不能为空") String content,
+            @RequestBody @Validated SavePlanRequest request,
             @RequestAttribute("currentUserId") Integer currentUserId) {
-        StudyPlan plan = studyPlanService.savePlan(currentUserId, courseName, availableDays, content);
+        StudyPlan plan = studyPlanService.savePlan(
+                currentUserId, request.getCourseName(), request.getAvailableDays(), request.getContent());
         return ApiResponse.success(plan);
     }
 

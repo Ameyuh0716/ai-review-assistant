@@ -7,17 +7,15 @@ import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 
 /**
- * 普通对话工具。
- * <p>
+ * 普通对话工具
+ * 
  * 处理问候、闲聊以及需要结合上下文的连续普通问答；不依赖知识库检索，直接通过大模型生成回复。
  */
 @Component
 public class ChatTool implements AgentTool {
 
-    /** 与 LLM 交互的聊天客户端。 */
     private final ChatClient chatClient;
 
-    /** Prompt 模板渲染器。 */
     private final PromptTemplate promptTemplate;
 
     /**
