@@ -1,15 +1,19 @@
 package com.aiservice.aireviewassistant.controller;
 
 import com.aiservice.aireviewassistant.common.ApiResponse;
+import com.aiservice.aireviewassistant.common.SseUtils;
 import com.aiservice.aireviewassistant.dto.SavePlanRequest;
 import com.aiservice.aireviewassistant.entity.StudyPlan;
 import com.aiservice.aireviewassistant.service.StudyPlanService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import org.springframework.http.MediaType;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
+import reactor.core.publisher.Flux;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * 学习计划控制器。
@@ -81,7 +85,52 @@ public class StudyPlanController {
         if (plan == null || !plan.getUserId().equals(currentUserId)) {
             return ApiResponse.error(404, "计划不存在或无权访问");
         }
+        plan.setDays(studyPlanService.parseDays(plan.getContent()));
         return ApiResponse.success(plan);
+    }
+
+    /**
+     * 保存计划的结构化进度（每日勾选状态等）。
+     * <p>PUT /api/plans/{id}/progress，请求体：{@code {"progress": "{\"1\":{\"done\":true}}"}}</p>
+     *
+     * @param id            学习计划主键
+     * @param body          包含 progress 字符串的请求体
+     * @param currentUserId 当前用户 ID
+     * @return 更新后的计划；无权限或不存在返回 404
+     */
+    @Operation(summary = "保存计划结构化进度")
+    @PutMapping("/{id}/progress")
+    public ApiResponse<StudyPlan> updateProgress(@PathVariable Integer id,
+                                                 @RequestBody Map<String, Object> body,
+                                                 @RequestAttribute("currentUserId") Integer currentUserId) {
+        Object progressObj = body.get("progress");
+        String progress = progressObj != null ? String.valueOf(progressObj) : "{}";
+        StudyPlan updated = studyPlanService.updateProgress(currentUserId, id, progress);
+        if (updated == null) {
+            return ApiResponse.error(404, "计划不存在或无权访问");
+        }
+        return ApiResponse.success(updated);
+    }
+
+    /**
+     * 流式生成某天某环节的学习材料（复习内容 / 掌握内容 / 练习）。
+     * <p>GET /api/plans/{id}/days/{day}/generate?section=review&token=xxx</p>
+     * <p>生成完成后服务端自动将内容写入计划进度，前端刷新后仍可查看。</p>
+     *
+     * @param id            学习计划主键
+     * @param day           天数序号（1 开始）
+     * @param section       环节：review / mastery / practice
+     * @param currentUserId 当前用户 ID
+     * @return SSE 流式文本（逐行补空格以适配浏览器 SSE 解析）
+     */
+    @Operation(summary = "按天生成学习材料（复习/掌握/练习）")
+    @GetMapping(value = "/{id}/days/{day}/generate", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<String> generateDaySection(@PathVariable Integer id,
+                                           @PathVariable Integer day,
+                                           @RequestParam(defaultValue = "review") String section,
+                                           @RequestAttribute("currentUserId") Integer currentUserId) {
+        return studyPlanService.generateDaySection(currentUserId, id, day, section)
+            .map(SseUtils::padSseLines);
     }
 
     /**

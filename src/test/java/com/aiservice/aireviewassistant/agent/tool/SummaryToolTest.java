@@ -117,8 +117,10 @@ class SummaryToolTest {
     void shouldReturnStreamFromExecute() {
         // 构造工具上下文：parameters 中显式指定 topic 为“索引”，课程 ID 为 3
         ToolContext context = new ToolContext("总结索引", 3, Map.of("topic", "索引"), null);
-        // 模拟 RagService 检索上下文
-        when(ragService.retrieveContext(anyString(), any())).thenReturn("上下文");
+        // 模拟 RagService 检索上下文与元数据
+        RagService.RagMeta meta = new RagService.RagMeta(1, 1, 3, 0.5, 10L, false, 0.7);
+        when(ragService.retrieveContextWithMeta(anyString(), any()))
+            .thenReturn(new RagService.RagContext(meta, "上下文"));
         // 模拟提示词模板渲染结果
         when(promptTemplate.render(anyString(), any(Map.class))).thenReturn("提示");
         // 配置 ChatClient 流式调用链：prompt -> system -> user -> stream -> content
@@ -128,8 +130,9 @@ class SummaryToolTest {
         when(requestSpec.stream()).thenReturn(streamResponseSpec);
         when(streamResponseSpec.content()).thenReturn(Flux.just("流式总结"));
 
-        // 验证流式输出包含“流式总结”并正常完成
+        // 验证首帧为元数据帧，随后输出“流式总结”并正常完成
         StepVerifier.create(summaryTool.stream(context))
+            .expectNext(meta.toSseJson())
             .expectNext("流式总结")
             .verifyComplete();
     }

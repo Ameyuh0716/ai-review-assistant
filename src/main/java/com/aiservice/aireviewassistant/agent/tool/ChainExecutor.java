@@ -2,6 +2,7 @@ package com.aiservice.aireviewassistant.agent.tool;
 
 import com.aiservice.aireviewassistant.config.PromptTemplate;
 import com.aiservice.aireviewassistant.entity.Message;
+import com.aiservice.aireviewassistant.service.RagService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -472,6 +473,8 @@ public class ChainExecutor {
         return Flux.concat(
                 Flux.just(header),
                 step.tool().stream(context)
+                        // 过滤 RAG 元数据帧：链式输出直接展示文本，不携带检索统计信息
+                        .filter(chunk -> chunk != null && !chunk.startsWith(RagService.RagMeta.SSE_PREFIX))
                         .doOnNext(buffer::append)
                         .doOnComplete(() -> results.add(
                                 new ChainStepResult(step.intent(), context.getParameters(), buffer.toString())))

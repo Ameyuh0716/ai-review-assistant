@@ -1,10 +1,12 @@
 package com.aiservice.aireviewassistant.entity;
 
+import com.aiservice.aireviewassistant.dto.PlanDayDto;
 import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import java.time.LocalDateTime;
+import java.util.List;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -39,6 +41,21 @@ public class StudyPlan {
     /** 计划内容，以 Markdown 格式存储，包含阶段任务与复习安排。 */
     @TableField("content")
     private String content;
+
+    /**
+     * 结构化进度（JSON 字符串）。
+     * <p>记录每天各环节（复习内容/掌握内容/练习）的勾选状态与 AI 生成内容，形如：
+     * {@code {"1": {"done": true, "review": {"done": true, "content": "..."}}}}。</p>
+     */
+    @TableField("progress")
+    private String progress;
+
+    /**
+     * 从正文解析出的每日结构（非数据库字段）。
+     * <p>由服务层在查询后填充，供前端渲染结构化视图；无分天结构时为空列表。</p>
+     */
+    @TableField(exist = false)
+    private List<PlanDayDto> days;
 
     /** 计划创建时间。 */
     @TableField("created_at")

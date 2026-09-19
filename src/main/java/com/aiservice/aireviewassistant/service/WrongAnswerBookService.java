@@ -51,6 +51,33 @@ public interface WrongAnswerBookService extends IService<WrongAnswerBook> {
     List<WrongAnswerBook> listWrong(Integer userId, Integer courseId, Boolean mastered);
 
     /**
+     * 查询用户的错题列表（扩展筛选）。
+     * <p>在课程与掌握状态过滤基础上，新增知识点精确过滤与关键词模糊搜索。</p>
+     *
+     * @param userId   用户 ID
+     * @param courseId 课程 ID，为 null 时不按课程过滤
+     * @param mastered 掌握状态，为 null 时不按状态过滤
+     * @param topic    知识点/主题，为 null 或空时不按知识点过滤
+     * @param keyword  关键词，匹配题干/知识点/解析；为 null 或空时不搜索
+     * @return 错题列表
+     */
+    List<WrongAnswerBook> listWrong(Integer userId, Integer courseId, Boolean mastered,
+                                   String topic, String keyword);
+
+    /**
+     * 重做一道错题并校验答案。
+     * <p>
+     * 答对时自动标记为已掌握；答错时错误次数 +1 并更新最后错误时间。
+     * 返回结果包含是否正确、正确答案、解析与最新掌握状态。
+     * </p>
+     *
+     * @param id         错题记录 ID
+     * @param userAnswer 用户本次选择的答案
+     * @return 重做结果映射；错题不存在时返回 null
+     */
+    Map<String, Object> redo(Integer id, String userAnswer);
+
+    /**
      * 将指定错题标记为已掌握。
      *
      * @param id 错题记录 ID

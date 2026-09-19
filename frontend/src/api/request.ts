@@ -121,7 +121,16 @@ request.interceptors.response.use(
         const authStore = useAuthStore()
         authStore.logout()
         window.location.href = '/login'
+        return Promise.reject(error)
       }
+    }
+
+    // 刷新后仍然 401：属于会话彻底失效，静默登出跳转，避免弹出误导性的错误弹窗
+    if (status === 401) {
+      const authStore = useAuthStore()
+      authStore.logout()
+      window.location.href = '/login'
+      return Promise.reject(error)
     }
 
     const msg = error.response?.data?.message || error.message || '网络错误'

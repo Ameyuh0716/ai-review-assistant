@@ -1,6 +1,7 @@
 package com.aiservice.aireviewassistant.controller;
 
 import com.aiservice.aireviewassistant.annotation.RateLimit;
+import com.aiservice.aireviewassistant.common.SseUtils;
 import com.aiservice.aireviewassistant.service.impl.ReviewAssistantAgent;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -55,45 +56,22 @@ public class AgentController {
      * <p>HTTP: {@code GET /api/agent/stream?message=xxx&conversationId=1}，
      * 返回类型为 {@code text/event-stream}，适用于前端逐字展示 AI 回复。</p>
      *
-     * @param message        用户发送的消息内容，不能为空
-     * @param conversationId 可选的会话 ID，用于多轮上下文关联
-     * @param currentUserId  可选的当前登录用户 ID
+     * @param message          用户发送的消息内容，不能为空
+     * @param conversationId   可选的会话 ID，用于多轮上下文关联
+     * @param reuseUserMessage 为 true 时不重复保存用户消息（“重新生成”场景：用户消息已存在，只重生成回复）
+     * @param currentUserId    可选的当前登录用户 ID
      * @return SSE 流式文本序列
      */
     @Operation(summary = "流式对话", description = "SSE 流式返回，支持停止和重新生成")
-    @RateLimit(capacity = 30, duration = 1, unit = java.util.concurrent.TimeUnit.MINUTES, message = "流式对话请求过于频繁，请稍后再试。")
+    @RateLimit(capacity = 30, duration = 1, unit = java.util.concurrent.TimeUnit.MINUTES, message = "对话请求过于频繁，请稍后再试。")
     @GetMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<String> stream(@RequestParam("message") @NotBlank(message = "消息内容不能为空") String message,
                                @RequestParam(required = false) Integer conversationId,
+                               @RequestParam(required = false) Boolean reuseUserMessage,
                                @RequestAttribute(required = false) Integer currentUserId) {
-        return agent.chatStream(message, conversationId, currentUserId)
+        return agent.chatStream(message, conversationId, currentUserId, reuseUserMessage)
                 // ⚠️ 关键: SSE 规范要求客户端剥离每个 data 行后的一个前导空格
-                // (https://html.spec.whatwg.org/multipage/server-sent-events.html#event-stream-interpretation)
-                // Spring 编码器把含换行的 token 拆成多个 "data:" 行, 且不追加空格;
-                // 若某行内容本身以空格开头(markdown 缩进/硬换行/列表续行), 该空格会被浏览器吃掉。
-                // 故为"每一行"预置一个空格, 经浏览器剥离后与原始 token 逐字节一致。
-                .map(AgentController::padSseLines);
-    }
-
-    /**
-     * 为 SSE 数据的每一行预置一个前导空格。
-     * <p>浏览器解析 SSE 时会剥离每个 {@code data:} 行后的一个空格，
-     * 服务端逐行补位后即可保证含前导空格的文本（markdown 缩进、硬换行等）无损传输。</p>
-     *
-     * @param frame 原始 SSE 帧内容
-     * @return 每行前均带一个空格的帧内容
-     */
-    private static String padSseLines(String frame) {
-        StringBuilder sb = new StringBuilder(frame.length() + 8);
-        sb.append(' ');
-        for (int i = 0; i < frame.length(); i++) {
-            char c = frame.charAt(i);
-            sb.append(c);
-            if (c == '\n' && i < frame.length() - 1) {
-                // 换行后补位(行尾换行由 Spring 生成的行本身无需再补)
-                sb.append(' ');
-            }
-        }
-        return sb.toString();
+                // 详见 {@link SseUtils#padSseLines(String)}
+                .map(SseUtils::padSseLines);
     }
 }

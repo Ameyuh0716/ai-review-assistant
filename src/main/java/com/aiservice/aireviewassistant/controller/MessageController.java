@@ -55,4 +55,26 @@ public class MessageController {
     public ApiResponse<Boolean> save(@RequestBody Message message) {
         return ApiResponse.success(messageService.save(message));
     }
+
+    /**
+     * 截断会话消息：删除指定消息及其之后的所有消息。
+     * <p>HTTP: {@code DELETE /api/messages/{id}/truncate}</p>
+     * <p>用于对话的“编辑并重新发送”与“重新生成”功能：先移除目标位置及其后的消息，
+     * 再由前端重新发起流式对话。消息不存在时返回 false（幂等）。</p>
+     *
+     * @param id 起始消息 ID（包含该条）
+     * @return 是否有消息被删除
+     */
+    @DeleteMapping("/{id}/truncate")
+    public ApiResponse<Boolean> truncate(@PathVariable Integer id) {
+        Message message = messageService.getById(id);
+        if (message == null) {
+            return ApiResponse.success(false);
+        }
+        // 同一会话内删除 id >= 起始消息的全部消息，保持多个会话互不影响
+        QueryWrapper<Message> wrapper = new QueryWrapper<>();
+        wrapper.eq("conversation_id", message.getConversationId());
+        wrapper.ge("id", id);
+        return ApiResponse.success(messageService.remove(wrapper));
+    }
 }

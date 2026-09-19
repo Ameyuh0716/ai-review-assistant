@@ -120,23 +120,42 @@ public class RagServiceImpl implements RagService {
      */
     @Override
     public Flux<String> answerQuestionStream(String question, Integer conversationId) {
-        SearchResult searchResult = searchDocuments(question);
+        return answerQuestionStreamWithMeta(question, conversationId).content();
+    }
 
+    /**
+     * 流式 RAG 问答（带检索元数据）。
+     * <p>在返回答案流的同时回传本次检索的命中数量、TopK、相似度、耗时等信息，
+     * 供前端在对话中展示 RAG 执行情况；同时将本次检索写入 rag_search_log。</p>
+     *
+     * @param question       用户问题
+     * @param conversationId 当前会话 ID
+     * @return 检索元数据 + 答案流
+     */
+    @Override
+    public RagAnswer answerQuestionStreamWithMeta(String question, Integer conversationId) {
+        long startTime = System.currentTimeMillis();
+        SearchResult searchResult = searchDocuments(question);
+        logSearch(question, conversationId, searchResult, null,
+            System.currentTimeMillis() - startTime, true, null);
+
+        Flux<String> content;
         if (searchResult.isEmpty()) {
             // 无知识库命中，直接流式调用 LLM，减少不必要的提示词长度
-            return chatClient.prompt()
+            content = chatClient.prompt()
+                .user(question)
+                .stream()
+                .content();
+        } else {
+            // 有知识库命中，用 RAG 上下文流式生成，兼顾实时性与事实性
+            String systemPrompt = promptTemplate.render("rag-system.txt", Map.of("context", searchResult.context()));
+            content = chatClient.prompt()
+                .system(systemPrompt)
                 .user(question)
                 .stream()
                 .content();
         }
-
-        // 有知识库命中，用 RAG 上下文流式生成，兼顾实时性与事实性
-        String systemPrompt = promptTemplate.render("rag-system.txt", Map.of("context", searchResult.context()));
-        return chatClient.prompt()
-            .system(systemPrompt)
-            .user(question)
-            .stream()
-            .content();
+        return new RagAnswer(searchResult.meta(), content);
     }
 
     /**
@@ -148,8 +167,24 @@ public class RagServiceImpl implements RagService {
      */
     @Override
     public String retrieveContext(String query, Integer conversationId) {
+        return retrieveContextWithMeta(query, conversationId).context();
+    }
+
+    /**
+     * 检索知识库上下文（带检索元数据）。
+     * <p>供总结/解释工具使用：除上下文外回传检索统计，并写入 rag_search_log。</p>
+     *
+     * @param query          查询文本
+     * @param conversationId 当前会话 ID
+     * @return 检索元数据 + 拼接上下文
+     */
+    @Override
+    public RagContext retrieveContextWithMeta(String query, Integer conversationId) {
+        long startTime = System.currentTimeMillis();
         SearchResult searchResult = searchDocuments(query);
-        return searchResult.context();
+        logSearch(query, conversationId, searchResult, null,
+            System.currentTimeMillis() - startTime, true, null);
+        return new RagContext(searchResult.meta(), searchResult.context());
     }
 
     /**
@@ -169,12 +204,14 @@ public class RagServiceImpl implements RagService {
     private SearchResult searchDocuments(String question) {
         long searchStart = System.currentTimeMillis();
         List<Document> docs = null;
+        int topK = ragProperties.getTopK();
+        double threshold = ragProperties.getSimilarityThreshold();
+        // 记录向量检索初始召回数（重排序前），用于前端展示检索漏斗
+        int candidateCount = 0;
+        boolean keywordFallback = false;
         try {
-            // 读取 RAG 配置：TopK、相似度阈值、重排序候选倍数
-            int topK = ragProperties.getTopK();
-            double threshold = ragProperties.getSimilarityThreshold();
-            int candidateMultiplier = ragProperties.getRerankCandidateMultiplier();
             // 若启用重排序，先召回 candidateMultiplier 倍文档作为候选集
+            int candidateMultiplier = ragProperties.getRerankCandidateMultiplier();
             int searchTopK = ragProperties.isRerankEnabled() ? topK * candidateMultiplier : topK;
 
             // 调用向量库执行相似度检索：query 向量化 + 向量空间最近邻搜索
@@ -185,6 +222,7 @@ public class RagServiceImpl implements RagService {
                     .similarityThreshold(threshold)
                     .build()
             );
+            candidateCount = docs.size();
 
             // 打印检索调试信息，便于排查召回与阈值问题
             log.debug("========== RAG 检索日志 ==========");
@@ -204,19 +242,25 @@ public class RagServiceImpl implements RagService {
             // 避免下游工具拿到空上下文后误报"知识库中暂无相关内容"。
             if (docs.isEmpty()) {
                 docs = keywordFallbackSearch(question, topK);
-                if (!docs.isEmpty()) {
+                keywordFallback = !docs.isEmpty();
+                if (keywordFallback) {
                     log.debug("向量检索零命中，关键词兜底召回 {} 篇", docs.size());
                 }
             }
 
-            // 构建供日志记录的 JSON 片段与供模型使用的拼接上下文
+            // 构建供日志记录的 JSON 片段、供模型使用的拼接上下文，并统计最高相似度
             List<Map<String, Object>> chunks = new ArrayList<>();
             StringBuilder contextBuilder = new StringBuilder();
+            Double topScore = null;
             for (int i = 0; i < docs.size(); i++) {
                 Document doc = docs.get(i);
                 log.debug("--- 文档 {} ---", i + 1);
                 log.debug("内容: {}", doc.getText());
                 log.debug("相似度分数: {}", doc.getScore());
+
+                if (doc.getScore() != null && (topScore == null || doc.getScore() > topScore)) {
+                    topScore = doc.getScore();
+                }
 
                 Map<String, Object> chunk = new LinkedHashMap<>();
                 chunk.put("index", i + 1);
@@ -235,11 +279,15 @@ public class RagServiceImpl implements RagService {
 
             // 将片段元数据序列化为 JSON 字符串，用于后续检索日志落库
             String chunksJson = objectMapper.writeValueAsString(chunks);
-            return new SearchResult(docs.size(), chunksJson, contextBuilder.toString());
+            RagMeta meta = new RagMeta(docs.size(), candidateCount, topK, threshold,
+                System.currentTimeMillis() - searchStart, keywordFallback, topScore);
+            return new SearchResult(docs.size(), chunksJson, contextBuilder.toString(), meta);
         } catch (Exception e) {
             // 向量检索异常不阻断主流程，返回空结果，由上层决定是否直接调用大模型
             log.error("[RAG] 向量检索失败: {}", e.getMessage(), e);
-            return new SearchResult(0, "[]", "");
+            RagMeta meta = new RagMeta(0, candidateCount, topK, threshold,
+                System.currentTimeMillis() - searchStart, false, null);
+            return new SearchResult(0, "[]", "", meta);
         } finally {
             // 无论成功失败都记录检索耗时与召回数量，保证指标完整性
             long searchDuration = System.currentTimeMillis() - searchStart;
@@ -386,8 +434,9 @@ public class RagServiceImpl implements RagService {
      * @param count      命中文档数量
      * @param chunksJson 检索片段 JSON 字符串，用于日志落库
      * @param context    拼接后的上下文文本，用于注入系统提示词
+     * @param meta       检索元数据，用于前端展示 RAG 执行情况
      */
-    private record SearchResult(int count, String chunksJson, String context) {
+    private record SearchResult(int count, String chunksJson, String context, RagMeta meta) {
         boolean isEmpty() {
             return count == 0;
         }

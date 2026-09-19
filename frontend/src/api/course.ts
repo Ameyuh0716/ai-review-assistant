@@ -28,3 +28,8 @@ export function updateCourse(id: number, course: Partial<Course>) {
 export function deleteCourse(id: number) {
   return del<boolean>(`/api/courses/${id}`)
 }
+
+/** AI 根据课程名称生成课程描述 */
+export function generateCourseDescription(name: string) {
+  return post<string>('/api/courses/generate-description', { name }, { timeout: 60000 })
+}

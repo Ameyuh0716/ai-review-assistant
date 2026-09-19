@@ -14,6 +14,19 @@ export interface Message {
   content: string
   intent?: string
   createdAt: string
+  /** RAG 检索元数据（仅前端附加，不来自后端消息表） */
+  ragMeta?: RagMetaInfo
+}
+
+/** RAG 检索元数据，用于对话中标注知识库检索情况 */
+export interface RagMetaInfo {
+  resultCount: number
+  topK: number
+  threshold?: number
+  latencyMs?: number
+  keywordFallback?: boolean
+  topScore?: number | null
+  candidateCount?: number
 }
 
 export function listConversations() {
@@ -34,4 +47,12 @@ export function deleteConversation(id: number) {
 
 export function listMessages(conversationId: number) {
   return get<Message[]>(`/api/messages?conversationId=${conversationId}`)
+}
+
+/**
+ * 截断会话消息：删除指定消息及其之后的所有消息。
+ * 用于“编辑并重新发送”与“重新生成”功能。
+ */
+export function truncateMessages(messageId: number) {
+  return del<boolean>(`/api/messages/${messageId}/truncate`)
 }

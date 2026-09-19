@@ -78,8 +78,31 @@ public class CoursesController {
                                      @RequestAttribute(required = false) Integer currentUserId) {
         Integer userId = currentUserId != null ? currentUserId : 0;
         course.setUserId(userId);
+        // 未填写课程描述时，由 AI 根据课程名称自动生成一段描述
+        if (course.getDescription() == null || course.getDescription().isBlank()) {
+            course.setDescription(coursesService.generateDescription(course.getName()));
+        }
         coursesService.save(course);
         return ApiResponse.success(course);
+    }
+
+    /**
+     * AI 生成课程描述。
+     * <p>HTTP: {@code POST /api/courses/generate-description}</p>
+     * <p>请求体：{@code {"name": "操作系统"}}，供前端在表单中点击“AI 生成”时调用。</p>
+     *
+     * @param body 包含 name 的 JSON 请求体
+     * @return 生成的课程描述
+     */
+    @Operation(summary = "AI 生成课程描述")
+    @PostMapping("/generate-description")
+    public ApiResponse<String> generateDescription(@RequestBody java.util.Map<String, Object> body) {
+        Object nameObj = body.get("name");
+        String name = nameObj != null ? String.valueOf(nameObj).trim() : "";
+        if (name.isEmpty()) {
+            return ApiResponse.error(400, "课程名称不能为空");
+        }
+        return ApiResponse.success(coursesService.generateDescription(name));
     }
 
     /**

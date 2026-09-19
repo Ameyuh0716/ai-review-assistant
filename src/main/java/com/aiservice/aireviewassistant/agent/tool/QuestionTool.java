@@ -67,12 +67,18 @@ public class QuestionTool implements AgentTool {
 
     /**
      * 流式基于知识库回答问题。
+     * <p>首个帧为 RAG 检索元数据（{"__rag":...}），前端据此展示检索命中情况。</p>
      *
      * @param context 工具执行上下文
-     * @return 流式答案片段
+     * @return 流式答案片段（首帧为元数据帧）
      */
     @Override
     public Flux<String> stream(ToolContext context) {
-        return ragService.answerQuestionStream(context.getUserMessage(), context.getConversationId());
+        RagService.RagAnswer answer = ragService.answerQuestionStreamWithMeta(
+            context.getUserMessage(), context.getConversationId());
+        return Flux.concat(
+            Flux.just(answer.meta().toSseJson()),
+            answer.content()
+        );
     }
 }

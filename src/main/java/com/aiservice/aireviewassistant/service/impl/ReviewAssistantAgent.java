@@ -12,6 +12,7 @@ import com.aiservice.aireviewassistant.metrics.AgentMetrics;
 import com.aiservice.aireviewassistant.service.AgentLogService;
 import com.aiservice.aireviewassistant.service.ConversationService;
 import com.aiservice.aireviewassistant.service.MessageService;
+import com.aiservice.aireviewassistant.service.RagService;
 import com.aiservice.aireviewassistant.service.ReviewRecordsService;
 import com.aiservice.aireviewassistant.service.StudyPlanService;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -354,20 +355,46 @@ public class ReviewAssistantAgent {
      * @return 包含会话元数据与流式内容的 {@link Flux}
      */
     public Flux<String> chatStream(String userMessage, Integer conversationId, Integer userId) {
+        return chatStream(userMessage, conversationId, userId, false);
+    }
+
+    /**
+     * Agent 核心对话入口（流式 SSE 模式，带用户身份与“重新生成”支持）。
+     * <p>
+     * 执行链路与 {@link #chat(String, Integer, Integer)} 类似，但工具输出通过 {@link AgentTool#stream}
+     * 以流式方式返回。首帧会发送会话元数据，供前端绑定 conversationId；内容帧结束后在
+     * {@code doOnComplete} 中完成消息、复习记录、日志与学习计划的持久化。
+     * </p>
+     *
+     * @param userMessage      用户输入消息
+     * @param conversationId   会话 ID，可为 null
+     * @param userId           用户 ID，可为 null
+     * @param reuseUserMessage 为 true 时视为“重新生成”：不重复保存用户消息，也不重复计入复习记录，
+     *                         仅在提示词历史中保留一次该消息
+     * @return 包含会话元数据与流式内容的 {@link Flux}
+     */
+    public Flux<String> chatStream(String userMessage, Integer conversationId, Integer userId,
+                                   Boolean reuseUserMessage) {
         long startTime = System.currentTimeMillis();
         String intent = null;
         Map<String, String> params = null;
         Integer convId = null;
         Conversation conversation = null;
+        final boolean reuse = Boolean.TRUE.equals(reuseUserMessage);
         try {
             conversation = getOrCreateConversation(conversationId, userMessage, userId);
             convId = conversation.getId();
 
-            // 持久化用户原始消息
-            saveMessage(convId, "user", userMessage, null);
+            // 持久化用户原始消息（“重新生成”场景下用户消息已存在，避免重复保存）
+            if (!reuse) {
+                saveMessage(convId, "user", userMessage, null);
+            }
 
-            // 加载历史消息并复用
+            // 加载历史消息并复用；重新生成时去掉末尾重复的当前用户消息（由工具重新拼接）
             List<Message> history = loadHistory(convId);
+            if (reuse) {
+                history = trimTrailingUserMessage(history, userMessage);
+            }
 
             // 第一个 SSE 事件：发送会话元数据，前端据此绑定 conversationId
             Flux<String> metaFlux = Flux.just("{\"conversationId\":" + convId + "}");
@@ -385,9 +412,12 @@ public class ReviewAssistantAgent {
                     .doOnComplete(() -> {
                         String fullText = chainBuffer.toString();
                         saveMessage(chainConvId, "assistant", fullText, "CHAIN");
-                        saveReviewRecord(chainConvId,
-                                chainConversation != null ? chainConversation.getUserId() : null,
-                                userMessage, fullText);
+                        // 重新生成场景不重复计入复习记录，避免统计数据虚高
+                        if (!reuse) {
+                            saveReviewRecord(chainConvId,
+                                    chainConversation != null ? chainConversation.getUserId() : null,
+                                    userMessage, fullText);
+                        }
                         saveAgentLog(chainConvId, userMessage, "CHAIN", null, startTime, true, null);
                         // 链式请求中的计划步骤同样需要归档到学习计划板块
                         savePlansFromChain(chainResults, userId);
@@ -439,14 +469,22 @@ public class ReviewAssistantAgent {
             final AgentTool finalTool = tool;
             final ToolContext finalContext = context;
             Flux<String> contentFlux = responseFlux
-                // 边收边拼，用于最终持久化完整回复
-                .doOnNext(contentBuffer::append)
+                // 边收边拼，用于最终持久化完整回复；RAG 元数据帧仅用于前端展示，不写入消息内容
+                .doOnNext(chunk -> {
+                    if (chunk != null && chunk.startsWith(RagService.RagMeta.SSE_PREFIX)) {
+                        return;
+                    }
+                    contentBuffer.append(chunk);
+                })
                 .doOnComplete(() -> {
                     successFlag[0] = true;
                     String fullResponse = contentBuffer.toString();
                     // 流式结束后一次性保存完整 AI 回复、复习记录与日志
                     saveMessage(finalConvId, "assistant", fullResponse, finalIntent);
-                    saveReviewRecord(finalConvId, finalConversation != null ? finalConversation.getUserId() : null, userMessage, fullResponse);
+                    // 重新生成场景不重复计入复习记录，避免统计数据虚高
+                    if (!reuse) {
+                        saveReviewRecord(finalConvId, finalConversation != null ? finalConversation.getUserId() : null, userMessage, fullResponse);
+                    }
                     saveAgentLog(finalConvId, userMessage, finalIntent, finalParams, startTime, true, null);
                     // 学习计划生成完毕后自动保存到学习计划板块
                     if ("PLAN".equals(finalIntent) && finalUserId != null) {
@@ -897,5 +935,27 @@ public class ReviewAssistantAgent {
      */
     private boolean hasHistory(List<Message> history) {
         return history != null && !history.isEmpty();
+    }
+
+    /**
+     * “重新生成”场景下去掉历史末尾重复的当前用户消息。
+     * <p>
+     * 重新生成时用户消息已入库且不会被再次保存，但工具在构建提示词时会自行拼接当前消息；
+     * 若历史中保留该消息会导致同一句话出现两次，因此先裁掉末尾这条相同内容的消息。
+     * </p>
+     *
+     * @param history     历史消息列表
+     * @param userMessage 当前用户消息
+     * @return 裁剪后的历史消息列表
+     */
+    private List<Message> trimTrailingUserMessage(List<Message> history, String userMessage) {
+        if (history == null || history.isEmpty() || userMessage == null) {
+            return history;
+        }
+        Message last = history.get(history.size() - 1);
+        if ("user".equals(last.getRole()) && userMessage.equals(last.getContent())) {
+            return new ArrayList<>(history.subList(0, history.size() - 1));
+        }
+        return history;
     }
 }

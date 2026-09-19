@@ -42,7 +42,26 @@
           <el-input v-model="form.name" placeholder="例如：操作系统" />
         </el-form-item>
         <el-form-item label="课程描述">
-          <el-input v-model="form.description" type="textarea" :rows="3" placeholder="可选" />
+          <div class="desc-field">
+            <el-input
+              v-model="form.description"
+              type="textarea"
+              :rows="3"
+              placeholder="可选，留空将由 AI 自动生成"
+            />
+            <div class="desc-hint">
+              <span class="hint-text">留空保存时，AI 会根据课程名称自动生成描述</span>
+              <el-button
+                link
+                type="primary"
+                :loading="generatingDesc"
+                :disabled="!form.name"
+                @click="generateDesc"
+              >
+                <el-icon><MagicStick /></el-icon> AI 生成
+              </el-button>
+            </div>
+          </div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -61,7 +80,7 @@ import AppLayout from '@/components/AppLayout.vue'
 import { useChatStore } from '@/stores/chat'
 import * as courseApi from '@/api/course'
 import type { Course } from '@/api/course'
-import { Plus, Edit, Delete, ChatDotRound } from '@element-plus/icons-vue'
+import { Plus, Edit, Delete, ChatDotRound, MagicStick } from '@element-plus/icons-vue'
 
 const router = useRouter()
 const chatStore = useChatStore()
@@ -70,6 +89,7 @@ const courses = ref<Course[]>([])
 const dialogVisible = ref(false)
 const isEdit = ref(false)
 const submitting = ref(false)
+const generatingDesc = ref(false)
 const formRef = ref<FormInstance>()
 const form = ref<Partial<Course>>({ name: '', description: '' })
 
@@ -114,6 +134,24 @@ async function handleSubmit() {
       submitting.value = false
     }
   })
+}
+
+/** 调用 AI 根据课程名称生成一段描述 */
+async function generateDesc() {
+  const name = form.value.name?.trim()
+  if (!name) {
+    ElMessage.warning('请先填写课程名称')
+    return
+  }
+  generatingDesc.value = true
+  try {
+    form.value.description = await courseApi.generateCourseDescription(name)
+    ElMessage.success('已生成课程描述')
+  } catch (e) {
+    console.error(e)
+  } finally {
+    generatingDesc.value = false
+  }
 }
 
 async function handleDelete(id: number) {
@@ -198,5 +236,20 @@ function selectCourse(course: Course) {
 .course-footer {
   display: flex;
   justify-content: flex-end;
+}
+.desc-field {
+  width: 100%;
+}
+.desc-hint {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 6px;
+  gap: 8px;
+}
+.desc-hint .hint-text {
+  font-size: 12px;
+  color: var(--color-muted-foreground);
+  line-height: 1.4;
 }
 </style>

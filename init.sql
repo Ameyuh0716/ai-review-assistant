@@ -26,10 +26,11 @@ CREATE TABLE IF NOT EXISTS courses (
 );
 
 -- 创建复习记录表（存储用户复习记录）
+-- 创建复习记录表（存储用户复习问答的沉淀记录，course_id 允许为空：未绑定课程的对话同样计入学习统计）
 CREATE TABLE IF NOT EXISTS review_records (
     id SERIAL PRIMARY KEY,
     conversation_id INTEGER,
-    course_id INTEGER NOT NULL,
+    course_id INTEGER,
     user_id VARCHAR(50),
     question TEXT,
     answer TEXT,
@@ -130,6 +131,8 @@ CREATE TABLE IF NOT EXISTS study_plan (
     course_name VARCHAR(100) NOT NULL,
     available_days VARCHAR(20) NOT NULL,
     content TEXT NOT NULL,
+    -- 结构化进度 JSON：{"1": {"done": true, "review": {"done": true, "content": "..."}}}
+    progress TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

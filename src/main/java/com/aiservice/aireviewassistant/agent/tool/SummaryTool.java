@@ -91,21 +91,25 @@ public class SummaryTool implements AgentTool {
 
     /**
      * 流式生成总结。
+     * <p>首个帧为 RAG 检索元数据（{"__rag":...}），前端据此展示检索命中情况。</p>
      *
      * @param context 工具执行上下文
-     * @return 流式总结片段
+     * @return 流式总结片段（首帧为元数据帧）
      */
     @Override
     public Flux<String> stream(ToolContext context) {
         String topic = extractTopic(context);
-        String retrievedContext = ragService.retrieveContext(topic, context.getConversationId());
+        RagService.RagContext ragContext = ragService.retrieveContextWithMeta(topic, context.getConversationId());
         String systemPrompt = promptTemplate.render("summary-system.txt",
-            Map.of("topic", topic, "context", retrievedContext));
-        return chatClient.prompt()
-            .system(systemPrompt)
-            .user("请生成总结")
-            .stream()
-            .content();
+            Map.of("topic", topic, "context", ragContext.context()));
+        return Flux.concat(
+            Flux.just(ragContext.meta().toSseJson()),
+            chatClient.prompt()
+                .system(systemPrompt)
+                .user("请生成总结")
+                .stream()
+                .content()
+        );
     }
 
     /**

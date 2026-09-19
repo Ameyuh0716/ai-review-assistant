@@ -32,11 +32,13 @@ public class WrongAnswerBookController {
 
     /**
      * 查询错题列表。
-     * <p>GET /api/wrong-book，支持按课程与掌握状态过滤。</p>
+     * <p>GET /api/wrong-book，支持按课程、掌握状态、知识点与关键词过滤。</p>
      *
      * @param currentUserId 当前用户 ID（可选）
      * @param courseId 课程 ID（可选）
      * @param mastered 是否已掌握（可选）
+     * @param topic 知识点/主题（可选，精确匹配）
+     * @param keyword 关键词（可选，模糊匹配题干/知识点/解析）
      * @return 错题列表
      */
     @Operation(summary = "查询错题列表")
@@ -44,10 +46,34 @@ public class WrongAnswerBookController {
     public ApiResponse<List<WrongAnswerBook>> list(
             @RequestAttribute(required = false) Integer currentUserId,
             @RequestParam(required = false) Integer courseId,
-            @RequestParam(required = false) Boolean mastered) {
+            @RequestParam(required = false) Boolean mastered,
+            @RequestParam(required = false) String topic,
+            @RequestParam(required = false) String keyword) {
         // 未登录用户统一使用 0 作为匿名标识
         Integer userId = currentUserId != null ? currentUserId : 0;
-        return ApiResponse.success(wrongAnswerBookService.listWrong(userId, courseId, mastered));
+        return ApiResponse.success(wrongAnswerBookService.listWrong(userId, courseId, mastered, topic, keyword));
+    }
+
+    /**
+     * 重做一道错题并提交答案。
+     * <p>POST /api/wrong-book/{id}/redo，请求体：{@code {"answer": "A"}}。</p>
+     * <p>答对自动标记掌握；答错则错误次数 +1。</p>
+     *
+     * @param id   错题主键
+     * @param body 包含 answer 的请求体
+     * @return 重做结果；错题不存在时返回 404
+     */
+    @Operation(summary = "重做错题")
+    @PostMapping("/{id}/redo")
+    public ApiResponse<Map<String, Object>> redo(@PathVariable Integer id,
+                                                 @RequestBody Map<String, Object> body) {
+        Object answerObj = body.get("answer");
+        Map<String, Object> result = wrongAnswerBookService.redo(
+            id, answerObj != null ? String.valueOf(answerObj) : "");
+        if (result == null) {
+            return ApiResponse.error(404, "错题不存在");
+        }
+        return ApiResponse.success(result);
     }
 
     /**

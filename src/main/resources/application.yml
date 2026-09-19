@@ -51,6 +51,8 @@ ai:
   model:
     provider: dashscope
     name: qwen-plus
+    # 快速模型：用于出题等对速度敏感的场景（qwen-turbo 出题速度约为 qwen-plus 的 4-5 倍）
+    fast-name: qwen-turbo
     temperature: 0.9
 
 mybatis-plus:

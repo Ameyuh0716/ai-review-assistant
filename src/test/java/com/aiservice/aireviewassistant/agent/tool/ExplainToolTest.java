@@ -114,8 +114,10 @@ class ExplainToolTest {
     void shouldReturnStreamFromExecute() {
         ToolContext context = new ToolContext("解释 B+树", 3, Map.of("concept", "B+树"), null);
 
-        // mock RAG 检索、prompt 渲染与 ChatClient stream 调用链
-        when(ragService.retrieveContext(anyString(), any())).thenReturn("上下文");
+        // mock RAG 检索（带元数据）、prompt 渲染与 ChatClient stream 调用链
+        RagService.RagMeta meta = new RagService.RagMeta(1, 1, 3, 0.5, 9L, false, 0.75);
+        when(ragService.retrieveContextWithMeta(anyString(), any()))
+            .thenReturn(new RagService.RagContext(meta, "上下文"));
         when(promptTemplate.render(anyString(), any(Map.class))).thenReturn("提示");
         when(chatClient.prompt()).thenReturn(requestSpec);
         when(requestSpec.system(anyString())).thenReturn(requestSpec);
@@ -123,8 +125,9 @@ class ExplainToolTest {
         when(requestSpec.stream()).thenReturn(streamResponseSpec);
         when(streamResponseSpec.content()).thenReturn(Flux.just("B+树解释"));
 
-        // 验证流按预期发射并正常完成
+        // 验证首帧为元数据帧，随后按预期发射并正常完成
         StepVerifier.create(explainTool.stream(context))
+            .expectNext(meta.toSseJson())
             .expectNext("B+树解释")
             .verifyComplete();
     }

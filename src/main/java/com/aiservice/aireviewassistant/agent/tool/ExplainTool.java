@@ -91,21 +91,25 @@ public class ExplainTool implements AgentTool {
 
     /**
      * 流式执行解释，返回逐字输出流。
+     * <p>首个帧为 RAG 检索元数据（{"__rag":...}），前端据此展示检索命中情况。</p>
      *
      * @param context 工具执行上下文
-     * @return 流式解释片段
+     * @return 流式解释片段（首帧为元数据帧）
      */
     @Override
     public Flux<String> stream(ToolContext context) {
         String concept = extractConcept(context);
-        String retrievedContext = ragService.retrieveContext(concept, context.getConversationId());
+        RagService.RagContext ragContext = ragService.retrieveContextWithMeta(concept, context.getConversationId());
         String systemPrompt = promptTemplate.render("explain-system.txt",
-            Map.of("concept", concept, "context", retrievedContext));
-        return chatClient.prompt()
-            .system(systemPrompt)
-            .user("请详细解释")
-            .stream()
-            .content();
+            Map.of("concept", concept, "context", ragContext.context()));
+        return Flux.concat(
+            Flux.just(ragContext.meta().toSseJson()),
+            chatClient.prompt()
+                .system(systemPrompt)
+                .user("请详细解释")
+                .stream()
+                .content()
+        );
     }
 
     /**

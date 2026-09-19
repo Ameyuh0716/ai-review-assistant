@@ -1,6 +1,7 @@
 package com.aiservice.aireviewassistant.controller;
 
 import com.aiservice.aireviewassistant.common.ApiResponse;
+import com.aiservice.aireviewassistant.common.SseUtils;
 import com.aiservice.aireviewassistant.dto.QuizGradingResult;
 import com.aiservice.aireviewassistant.dto.QuizSubmitRequest;
 import com.aiservice.aireviewassistant.entity.Courses;
@@ -13,8 +14,10 @@ import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import org.springframework.http.MediaType;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
+import reactor.core.publisher.Flux;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -83,19 +86,66 @@ public class QuizController {
         if (course == null) {
             return ApiResponse.error(404, "课程不存在");
         }
-        Object topicObj = body.get("topic");
-        String topic = topicObj != null ? String.valueOf(topicObj) : course.getName();
-        int count = 1;
-        Object countObj = body.get("count");
+        String topic = resolveTopic(body.get("topic"), course.getName());
+        int count = resolveCount(body.get("count"));
+        return ApiResponse.success(quizService.generateQuiz(topic, count));
+    }
+
+    /**
+     * 流式生成练习题（SSE）。
+     * <p>HTTP: {@code GET /api/quiz/generate-stream?courseId=1&topic=进程同步&count=5}</p>
+     * <p>帧格式：模型原始 token 实时下发（前端立即显示生成过程），最后一帧为 JSON 控制帧
+     * {@code {"__quizFinal":true,"content":"<格式化后的标准 Markdown>"}}。</p>
+     *
+     * @param courseId 课程 ID
+     * @param topic    知识点主题（可选，为空时使用课程名称）
+     * @param count    题目数量（可选，默认 5，范围 1-10）
+     * @return SSE 流式帧序列
+     */
+    @Operation(summary = "流式生成练习题")
+    @GetMapping(value = "/generate-stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<String> generateStream(@RequestParam Integer courseId,
+                                       @RequestParam(required = false) String topic,
+                                       @RequestParam(required = false) Integer count) {
+        Courses course = coursesService.getById(courseId);
+        if (course == null) {
+            return Flux.just("课程不存在");
+        }
+        String resolvedTopic = resolveTopic(topic, course.getName());
+        int resolvedCount = resolveCount(count);
+        // 复用 SSE 逐行补空格的编码策略，保证含前导空格的 markdown 不被浏览器剥离
+        return quizService.generateQuizStreamWithFinal(resolvedTopic, resolvedCount)
+            .map(SseUtils::padSseLines);
+    }
+
+    /**
+     * 解析题目主题：为空时回退到课程名称，避免模型收到空主题后产出无法解析的内容。
+     *
+     * @param topicObj    请求中的主题原始值
+     * @param courseName  课程名称（兜底值）
+     * @return 最终使用的主题
+     */
+    private String resolveTopic(Object topicObj, String courseName) {
+        String topic = topicObj != null ? String.valueOf(topicObj).trim() : "";
+        return topic.isEmpty() ? courseName : topic;
+    }
+
+    /**
+     * 解析题目数量：兼容浮点形式，并限制在 1-10 之间，缺省为 5。
+     *
+     * @param countObj 请求中的数量原始值
+     * @return 合法题目数量
+     */
+    private int resolveCount(Object countObj) {
+        int count = 5;
         if (countObj != null) {
             try {
-                count = Integer.parseInt(String.valueOf(countObj));
+                count = (int) Math.round(Double.parseDouble(String.valueOf(countObj)));
             } catch (NumberFormatException ignored) {
-                // 非法数量使用默认值 1
+                // 非法数量使用默认值 5
             }
         }
-        count = Math.max(1, Math.min(count, 10));
-        return ApiResponse.success(quizService.generateQuiz(topic, count));
+        return Math.max(1, Math.min(count, 10));
     }
 
     /**

@@ -1,5 +1,6 @@
 package com.aiservice.aireviewassistant.controller;
 
+import com.aiservice.aireviewassistant.common.ApiResponse;
 import com.aiservice.aireviewassistant.entity.RagSearchLog;
 import com.aiservice.aireviewassistant.service.RagSearchLogService;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
@@ -38,7 +39,7 @@ public class RagSearchLogController {
      */
     @Operation(summary = "查询 RAG 检索日志")
     @GetMapping
-    public List<RagSearchLog> list(@RequestParam(required = false) Integer conversationId) {
+    public ApiResponse<List<RagSearchLog>> list(@RequestParam(required = false) Integer conversationId) {
         QueryWrapper<RagSearchLog> wrapper = new QueryWrapper<>();
         // 按创建时间倒序排列，最新日志在前
         wrapper.orderByDesc("created_at");
@@ -46,7 +47,9 @@ public class RagSearchLogController {
         if (conversationId != null) {
             wrapper.eq("conversation_id", conversationId);
         }
-        return ragSearchLogService.list(wrapper);
+        // 限制返回数量，避免会话历史过长时响应体膨胀
+        wrapper.last("LIMIT 200");
+        return ApiResponse.success(ragSearchLogService.list(wrapper));
     }
 
     /**
@@ -58,7 +61,7 @@ public class RagSearchLogController {
      */
     @Operation(summary = "根据ID查询 RAG 检索日志")
     @GetMapping("/{id}")
-    public RagSearchLog getById(@PathVariable Integer id) {
-        return ragSearchLogService.getById(id);
+    public ApiResponse<RagSearchLog> getById(@PathVariable Integer id) {
+        return ApiResponse.success(ragSearchLogService.getById(id));
     }
 }

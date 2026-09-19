@@ -89,6 +89,22 @@ public class WrongAnswerBookServiceImpl extends ServiceImpl<WrongAnswerBookMappe
      */
     @Override
     public List<WrongAnswerBook> listWrong(Integer userId, Integer courseId, Boolean mastered) {
+        return listWrong(userId, courseId, mastered, null, null);
+    }
+
+    /**
+     * 查询用户错题列表（扩展筛选：知识点 + 关键词）。
+     *
+     * @param userId   用户 ID
+     * @param courseId 课程 ID，可选
+     * @param mastered 掌握状态，可选
+     * @param topic    知识点精确过滤，可选
+     * @param keyword  关键词模糊搜索（题干/知识点/解析），可选
+     * @return 错题列表
+     */
+    @Override
+    public List<WrongAnswerBook> listWrong(Integer userId, Integer courseId, Boolean mastered,
+                                           String topic, String keyword) {
         var query = lambdaQuery()
             .eq(WrongAnswerBook::getUserId, userId);
         // 动态追加课程过滤条件
@@ -99,7 +115,64 @@ public class WrongAnswerBookServiceImpl extends ServiceImpl<WrongAnswerBookMappe
         if (mastered != null) {
             query.eq(WrongAnswerBook::getIsMastered, mastered);
         }
+        // 知识点精确过滤
+        if (topic != null && !topic.isBlank()) {
+            query.eq(WrongAnswerBook::getTopic, topic.trim());
+        }
+        // 关键词模糊搜索：题干 / 知识点 / 解析 任一命中即可
+        if (keyword != null && !keyword.isBlank()) {
+            String kw = keyword.trim();
+            query.and(w -> w.like(WrongAnswerBook::getQuestion, kw)
+                .or().like(WrongAnswerBook::getTopic, kw)
+                .or().like(WrongAnswerBook::getExplanation, kw));
+        }
         return query.orderByDesc(WrongAnswerBook::getLastWrongAt).list();
+    }
+
+    /**
+     * 重做一道错题并校验答案。
+     * <p>答对自动标记掌握；答错则错误次数 +1 并更新最后错误时间。</p>
+     *
+     * @param id         错题记录 ID
+     * @param userAnswer 用户本次选择的答案
+     * @return 重做结果；错题不存在时返回 null
+     */
+    @Override
+    public Map<String, Object> redo(Integer id, String userAnswer) {
+        WrongAnswerBook book = getById(id);
+        if (book == null) {
+            return null;
+        }
+        String correctAnswer = book.getCorrectAnswer() == null ? "" : book.getCorrectAnswer().trim();
+        String answer = userAnswer == null ? "" : userAnswer.trim();
+        // 兼容正确答案为选项字母或完整选项文本两种存储形式
+        boolean correct = !correctAnswer.isEmpty() && !answer.isEmpty()
+            && (correctAnswer.equalsIgnoreCase(answer)
+                || correctAnswer.toUpperCase().startsWith(answer.toUpperCase()));
+
+        if (correct) {
+            // 答对：标记为已掌握
+            book.setIsMastered(true);
+            book.setUserAnswer(answer);
+            book.setUpdatedAt(LocalDateTime.now());
+            updateById(book);
+        } else {
+            // 答错：错误次数 +1，回到待复习状态（此前即使标记过掌握也应重新纳入复习）
+            book.setWrongCount((book.getWrongCount() == null ? 0 : book.getWrongCount()) + 1);
+            book.setUserAnswer(answer);
+            book.setIsMastered(false);
+            book.setLastWrongAt(LocalDateTime.now());
+            book.setUpdatedAt(LocalDateTime.now());
+            updateById(book);
+        }
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("correct", correct);
+        result.put("correctAnswer", book.getCorrectAnswer());
+        result.put("explanation", book.getExplanation());
+        result.put("wrongCount", book.getWrongCount());
+        result.put("isMastered", book.getIsMastered());
+        return result;
     }
 
     /**

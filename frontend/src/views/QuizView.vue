@@ -35,23 +35,42 @@
       </div>
     </template>
 
-    <el-dialog v-model="generateDialogVisible" title="AI 出题" width="480px">
-      <el-form :model="generateForm" label-width="80px">
+    <el-dialog
+      v-model="generateDialogVisible"
+      title="AI 出题"
+      width="520px"
+      :close-on-click-modal="!generating"
+      :show-close="!generating"
+    >
+      <el-form :model="generateForm" label-width="80px" :disabled="generating">
         <el-form-item label="选择课程">
           <el-select v-model="generateForm.courseId" placeholder="选择课程" style="width: 100%">
             <el-option v-for="course in courses" :key="course.id" :label="course.name" :value="course.id" />
           </el-select>
         </el-form-item>
         <el-form-item label="题目主题">
-          <el-input v-model="generateForm.topic" placeholder="例如：进程同步" />
+          <el-input v-model="generateForm.topic" placeholder="例如：进程同步（留空则按所选课程出题）" />
         </el-form-item>
         <el-form-item label="题目数量">
           <el-slider v-model="generateForm.count" :min="1" :max="10" show-stops />
         </el-form-item>
       </el-form>
+
+      <!-- 生成中的实时预览：模型 token 到达即展示，无需白屏等待 -->
+      <div v-if="generating" class="stream-panel">
+        <div class="stream-title">
+          <el-icon class="is-loading"><Loading /></el-icon>
+          <span>AI 正在出题（已接收 {{ streamPreview.length }} 字）…</span>
+        </div>
+        <pre class="stream-text">{{ streamPreview || '正在连接模型…' }}<span class="stream-cursor">▊</span></pre>
+      </div>
+
       <template #footer>
-        <el-button @click="generateDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="generating" @click="handleGenerate">生成</el-button>
+        <el-button v-if="generating" type="danger" plain @click="stopGenerate">停止生成</el-button>
+        <template v-else>
+          <el-button @click="generateDialogVisible = false">取消</el-button>
+          <el-button type="primary" @click="handleGenerate">生成</el-button>
+        </template>
       </template>
     </el-dialog>
 
@@ -72,13 +91,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 import AppLayout from '@/components/AppLayout.vue'
 import * as courseApi from '@/api/course'
 import * as quizApi from '@/api/quiz'
 import type { Course } from '@/api/course'
 import type { QuizQuestion, QuizResult } from '@/api/quiz'
-import { EditPen } from '@element-plus/icons-vue'
+import { EditPen, Loading } from '@element-plus/icons-vue'
 
 const courses = ref<Course[]>([])
 const questions = ref<QuizQuestion[]>([])
@@ -91,8 +110,17 @@ const generateDialogVisible = ref(false)
 const generateForm = ref({ courseId: undefined as number | undefined, topic: '', count: 5 })
 const currentQuizMeta = ref({ courseId: undefined as number | undefined, topic: '' })
 
+/** 生成中的实时预览文本（模型原始 token） */
+const streamPreview = ref('')
+let quizStream: EventSource | null = null
+
 onMounted(() => {
   loadCourses()
+})
+
+// 组件卸载时关闭未完成的事件流，避免连接泄漏
+onBeforeUnmount(() => {
+  closeStream()
 })
 
 async function loadCourses() {
@@ -108,23 +136,77 @@ async function handleGenerate() {
     ElMessage.warning('请选择课程')
     return
   }
+  if (generating.value) return
   generating.value = true
-  try {
-    const markdown = await quizApi.generateQuiz(
-      generateForm.value.courseId,
-      generateForm.value.topic,
-      generateForm.value.count
-    )
-    questions.value = parseQuestions(markdown)
-    answers.value = new Array(questions.value.length).fill('')
-    currentQuizMeta.value = {
-      courseId: generateForm.value.courseId,
-      topic: generateForm.value.topic || courses.value.find(c => c.id === generateForm.value.courseId)?.name || ''
+  streamPreview.value = ''
+  let gotFinal = false
+  const url = quizApi.buildQuizStreamUrl(
+    generateForm.value.courseId,
+    generateForm.value.topic,
+    generateForm.value.count
+  )
+  quizStream = new EventSource(url)
+  quizStream.onmessage = (event) => {
+    if (event.data === undefined || event.data === null) return
+    const data = event.data
+    // 结束帧：后端已统一格式化，直接解析为题目
+    if (data.startsWith(quizApi.QUIZ_FINAL_FRAME_PREFIX)) {
+      gotFinal = true
+      try {
+        applyGenerated(JSON.parse(data).content || '')
+      } catch (e) {
+        console.error('[quiz] 解析格式化帧失败', e)
+        applyGenerated(data)
+      }
+    } else {
+      // 原始 token：实时展示生成过程
+      streamPreview.value += data
     }
-    generateDialogVisible.value = false
-  } finally {
-    generating.value = false
   }
+  quizStream.onerror = () => {
+    const finished = gotFinal
+    closeStream()
+    if (!finished) {
+      ElMessage.error('出题失败或连接中断，请重试；若主题为空，建议填写明确的题目主题')
+    }
+  }
+}
+
+/** 解析格式化后的题目内容并填充页面 */
+function applyGenerated(formatted: string) {
+  const parsed = parseQuestions(formatted || '')
+  closeStream()
+  if (parsed.length === 0) {
+    // 解析失败时保留弹窗，方便用户补充/修改主题后直接重试
+    ElMessage.error('未能解析出题目，请重试；若主题为空，建议填写明确的题目主题')
+    return
+  }
+  questions.value = parsed
+  answers.value = new Array(parsed.length).fill('')
+  currentQuizMeta.value = {
+    courseId: generateForm.value.courseId,
+    topic:
+      generateForm.value.topic ||
+      courses.value.find(c => c.id === generateForm.value.courseId)?.name ||
+      ''
+  }
+  generateDialogVisible.value = false
+  streamPreview.value = ''
+  ElMessage.success(`已生成 ${parsed.length} 道题目`)
+}
+
+/** 用户主动停止生成 */
+function stopGenerate() {
+  closeStream()
+}
+
+/** 关闭事件流并复位生成状态 */
+function closeStream() {
+  if (quizStream) {
+    quizStream.close()
+    quizStream = null
+  }
+  generating.value = false
 }
 
 function parseQuestions(md: string): QuizQuestion[] {
@@ -269,6 +351,41 @@ async function submitQuiz() {
   gap: 32px;
   justify-content: center;
   margin-bottom: 20px;
+}
+/* 生成中的实时预览面板 */
+.stream-panel {
+  margin-top: 4px;
+}
+.stream-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--color-primary);
+  margin-bottom: 8px;
+}
+.stream-text {
+  margin: 0;
+  padding: 12px 14px;
+  max-height: 240px;
+  overflow-y: auto;
+  border-radius: var(--radius-md);
+  background: var(--color-muted);
+  border: 1px dashed var(--color-primary-200);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--color-muted-foreground);
+}
+.stream-cursor {
+  color: var(--color-primary);
+  animation: blink 1s infinite;
+}
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
 }
 .detail-item {
   padding: 12px 14px;

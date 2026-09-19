@@ -48,12 +48,40 @@ public class ChatClientConfig {
     @Bean
     @Primary
     public ChatClient chatClient(ChatClient.Builder builder) {
+        return buildClient(builder, modelProperties.getName());
+    }
+
+    /**
+     * 注册快速模型 {@link ChatClient} Bean（Bean 名 {@code fastChatClient}）。
+     * <p>用于对响应速度敏感、对措辞要求不高的场景（如批量出题）。
+     * 模型名取自 {@code ai.model.fast-name}，为空时回退到主模型名。</p>
+     *
+     * @param builder Spring AI 自动注入的 ChatClient.Builder
+     * @return 使用快速模型的 ChatClient 实例
+     */
+    @Bean("fastChatClient")
+    public ChatClient fastChatClient(ChatClient.Builder builder) {
+        String fastName = modelProperties.getFastName();
+        if (fastName == null || fastName.isBlank()) {
+            fastName = modelProperties.getName();
+        }
+        return buildClient(builder, fastName);
+    }
+
+    /**
+     * 按配置的供应商构建指定模型的 ChatClient。
+     *
+     * @param builder   Spring AI 自动注入的 ChatClient.Builder
+     * @param modelName 模型名称
+     * @return ChatClient 实例
+     */
+    private ChatClient buildClient(ChatClient.Builder builder, String modelName) {
         String provider = modelProperties.getProvider().toLowerCase();
         // 根据模型供应商选择对应的 ChatClient 构建策略
         return switch (provider) {
-            case "dashscope" -> buildDashScopeClient(builder);
-            case "openai" -> buildOpenAiClient();
-            case "ollama" -> buildOllamaClient();
+            case "dashscope" -> buildDashScopeClient(builder, modelName);
+            case "openai" -> buildOpenAiClient(modelName);
+            case "ollama" -> buildOllamaClient(modelName);
             default -> throw new IllegalArgumentException(
                 "不支持的模型供应商: " + provider + "，请配置 ai.model.provider=dashscope|openai|ollama");
         };
@@ -64,13 +92,14 @@ public class ChatClientConfig {
      * <p>直接使用 Spring AI Alibaba 自动注入的 {@link ChatClient.Builder}，
      * 并设置模型名称与温度参数。</p>
      *
-     * @param builder 自动注入的 ChatClient.Builder
+     * @param builder   自动注入的 ChatClient.Builder
+     * @param modelName 模型名称
      * @return DashScope ChatClient 实例
      */
-    private ChatClient buildDashScopeClient(ChatClient.Builder builder) {
+    private ChatClient buildDashScopeClient(ChatClient.Builder builder, String modelName) {
         return builder
             .defaultOptions(ChatOptions.builder()
-                .model(modelProperties.getName())
+                .model(modelName)
                 .temperature(modelProperties.getTemperature())
                 .build())
             .build();
@@ -81,10 +110,11 @@ public class ChatClientConfig {
      * <p>手动创建 {@code OpenAiApi} 与 {@code OpenAiChatModel}；若未配置 API Key 则抛出异常。
      * 当配置了 {@code ai.model.base-url} 时，会将其设置为自定义基础 URL（可用于代理）。</p>
      *
+     * @param modelName 模型名称
      * @return OpenAI ChatClient 实例
      * @throws IllegalArgumentException 当未配置 api-key 时抛出
      */
-    private ChatClient buildOpenAiClient() {
+    private ChatClient buildOpenAiClient(String modelName) {
         if (modelProperties.getApiKey() == null || modelProperties.getApiKey().isEmpty()) {
             throw new IllegalArgumentException("OpenAI 模型需要配置 ai.model.api-key");
         }
@@ -99,7 +129,7 @@ public class ChatClientConfig {
         OpenAiChatModel chatModel = OpenAiChatModel.builder()
             .openAiApi(openAiApi)
             .defaultOptions(OpenAiChatOptions.builder()
-                .model(modelProperties.getName())
+                .model(modelName)
                 .temperature(modelProperties.getTemperature())
                 .build())
             .build();
@@ -112,9 +142,10 @@ public class ChatClientConfig {
      * 若未配置 {@code ai.model.base-url}，则默认使用本地 Ollama 地址
      * {@code http://localhost:11434}。</p>
      *
+     * @param modelName 模型名称
      * @return Ollama ChatClient 实例
      */
-    private ChatClient buildOllamaClient() {
+    private ChatClient buildOllamaClient(String modelName) {
         // 未配置 base-url 时回退到本地 Ollama 默认端口
         String baseUrl = modelProperties.getBaseUrl();
         if (baseUrl == null || baseUrl.isEmpty()) {
@@ -126,7 +157,7 @@ public class ChatClientConfig {
         OllamaChatModel chatModel = OllamaChatModel.builder()
             .ollamaApi(ollamaApi)
             .defaultOptions(OllamaOptions.builder()
-                .model(modelProperties.getName())
+                .model(modelName)
                 .temperature(modelProperties.getTemperature())
                 .build())
             .build();

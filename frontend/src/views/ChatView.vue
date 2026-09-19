@@ -57,13 +57,94 @@
 
           <div
             v-for="(msg, index) in messages"
-            :key="index"
+            :key="msg.id ?? index"
             :class="['msg', msg.role]"
           >
-            <MarkdownRenderer :content="msg.content" :streaming="false" />
+            <!-- RAG 检索执行情况（仅 AI 消息；历史消息通过检索日志回填） -->
+            <div v-if="msg.role !== 'user' && msg.ragMeta" class="rag-badge">
+              <el-tooltip placement="top" effect="light">
+                <template #content>
+                  <div class="rag-tip">
+                    <p><strong>知识库检索详情</strong></p>
+                    <p>命中片段：{{ msg.ragMeta.resultCount }} / TopK {{ msg.ragMeta.topK }}</p>
+                    <p v-if="msg.ragMeta.candidateCount != null">向量初始召回：{{ msg.ragMeta.candidateCount }} 篇</p>
+                    <p v-if="msg.ragMeta.topScore != null">最高相似度：{{ Number(msg.ragMeta.topScore).toFixed(3) }}</p>
+                    <p v-if="msg.ragMeta.threshold != null">相似度阈值：{{ msg.ragMeta.threshold }}</p>
+                    <p v-if="msg.ragMeta.latencyMs != null">检索耗时：{{ msg.ragMeta.latencyMs }} ms</p>
+                    <p v-if="msg.ragMeta.keywordFallback">已触发关键词兜底召回</p>
+                  </div>
+                </template>
+                <span class="rag-content">
+                  <el-icon><Search /></el-icon>
+                  <template v-if="msg.ragMeta.resultCount > 0">
+                    知识库命中 {{ msg.ragMeta.resultCount }}/{{ msg.ragMeta.topK }}
+                  </template>
+                  <template v-else>知识库未命中</template>
+                  <span v-if="msg.ragMeta.topScore != null" class="rag-sep">
+                    · 相似度 {{ Number(msg.ragMeta.topScore).toFixed(2) }}
+                  </span>
+                  <span v-if="msg.ragMeta.latencyMs != null" class="rag-sep">
+                    · {{ msg.ragMeta.latencyMs }}ms
+                  </span>
+                </span>
+              </el-tooltip>
+            </div>
+
+            <!-- 编辑用户消息（DeepSeek 风格） -->
+            <div v-if="editingIndex === index" class="edit-box">
+              <el-input v-model="editingText" type="textarea" :rows="3" resize="none" />
+              <div class="edit-actions">
+                <el-button size="small" @click="cancelEdit">取消</el-button>
+                <el-button size="small" type="primary" @click="submitEdit">保存并发送</el-button>
+              </div>
+            </div>
+            <template v-else>
+              <MarkdownRenderer :content="msg.content" :streaming="false" />
+              <!-- 消息操作条：始终可见（兼容触屏），悬停高亮 -->
+              <div class="msg-actions">
+                <button class="act-btn" type="button" title="复制" @click="copyText(msg.content)">
+                  <el-icon><CopyDocument /></el-icon>
+                </button>
+                <button
+                  v-if="msg.role === 'user'"
+                  class="act-btn"
+                  type="button"
+                  title="编辑并重新发送"
+                  :disabled="isStreaming"
+                  @click="startEdit(index)"
+                >
+                  <el-icon><EditPen /></el-icon>
+                </button>
+                <button
+                  v-else
+                  class="act-btn"
+                  type="button"
+                  title="重新生成"
+                  :disabled="isStreaming || !canRegenerate(index)"
+                  @click="regenerate(index)"
+                >
+                  <el-icon><RefreshRight /></el-icon>
+                </button>
+              </div>
+            </template>
           </div>
 
           <div v-if="streamingMsg" class="msg ai typing">
+            <div v-if="streamRagMeta" class="rag-badge">
+              <span class="rag-content">
+                <el-icon><Search /></el-icon>
+                <template v-if="streamRagMeta.resultCount > 0">
+                  知识库命中 {{ streamRagMeta.resultCount }}/{{ streamRagMeta.topK }}
+                </template>
+                <template v-else>知识库未命中</template>
+                <span v-if="streamRagMeta.topScore != null" class="rag-sep">
+                  · 相似度 {{ Number(streamRagMeta.topScore).toFixed(2) }}
+                </span>
+                <span v-if="streamRagMeta.latencyMs != null" class="rag-sep">
+                  · {{ streamRagMeta.latencyMs }}ms
+                </span>
+              </span>
+            </div>
             <MarkdownRenderer :content="streamingMsg" :streaming="true" />
             <span class="cursor">▊</span>
           </div>
@@ -97,7 +178,7 @@
               type="primary"
               size="large"
               :disabled="!inputText.trim()"
-              @click="sendMessage"
+              @click="sendMessage()"
             >
               发送
             </el-button>
@@ -119,9 +200,10 @@ import MarkdownRenderer from '@/components/MarkdownRenderer.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useChatStore } from '@/stores/chat'
 import * as conversationApi from '@/api/conversation'
+import * as ragApi from '@/api/rag'
 import { buildStreamUrl } from '@/api/agent'
-import type { Conversation, Message } from '@/api/conversation'
-import { Plus, Close, ArrowDown } from '@element-plus/icons-vue'
+import type { Conversation, Message, RagMetaInfo } from '@/api/conversation'
+import { Plus, Close, ArrowDown, CopyDocument, EditPen, RefreshRight, Search } from '@element-plus/icons-vue'
 
 const authStore = useAuthStore()
 const chatStore = useChatStore()
@@ -138,6 +220,13 @@ const sidebarVisible = ref(false)
 const errorMsg = ref('')
 const chatBoxRef = ref<HTMLDivElement>()
 let eventSource: EventSource | null = null
+
+/** 当前流式回复的 RAG 检索元数据（收到 __rag 控制帧后填充） */
+const streamRagMeta = ref<RagMetaInfo | null>(null)
+
+/** 正在编辑的用户消息下标；null 表示无编辑 */
+const editingIndex = ref<number | null>(null)
+const editingText = ref('')
 
 /**
  * 是否自动跟随最新消息。
@@ -227,12 +316,15 @@ async function switchConversation(conv: Conversation) {
   autoFollow.value = true
   localStorage.setItem('currentConversationId', String(conv.id))
   sidebarVisible.value = false
+  editingIndex.value = null
   try {
     const msgs = await conversationApi.listMessages(conv.id)
     messages.value = msgs.map(m => ({
       ...m,
       content: m.intent === 'QUIZ' || m.intent === 'quiz' ? hideQuizAnswers(m.content) : m.content
     }))
+    // 历史消息回填 RAG 检索标记（依赖 rag_search_log）
+    await attachRagMeta(conv.id)
     // 历史消息渲染后可能有代码块/表格撑高，强制贴底
     scrollToBottom(true)
   } catch (e) {
@@ -275,14 +367,11 @@ function handleEnter(e: Event | KeyboardEvent) {
   }
 }
 
-function sendMessage() {
-  const text = inputText.value.trim()
+function sendMessage(explicitText?: string) {
+  const text = (explicitText ?? inputText.value).trim()
   if (!text || isStreaming.value) return
 
-  const fullMsg = chatStore.currentCourse && !text.includes(chatStore.currentCourse.name)
-    ? `[课程: ${chatStore.currentCourse.name}] ${text}`
-    : text
-
+  inputText.value = ''
   messages.value.push({
     id: Date.now(),
     conversationId: currentConversationId.value || 0,
@@ -290,59 +379,274 @@ function sendMessage() {
     content: text,
     createdAt: new Date().toISOString()
   })
-  inputText.value = ''
+  startStream(text, false)
+}
+
+/**
+ * 发起 SSE 流式对话。
+ *
+ * @param text             用户消息文本
+ * @param reuseUserMessage 为 true 时视为“重新生成”：服务端不重复保存用户消息
+ */
+function startStream(text: string, reuseUserMessage: boolean) {
+  if (isStreaming.value) return
+  const fullMsg = chatStore.currentCourse && !text.includes(chatStore.currentCourse.name)
+    ? `[课程: ${chatStore.currentCourse.name}] ${text}`
+    : text
+
   isStreaming.value = true
   streamingMsg.value = ''
+  streamRagMeta.value = null
   // 主动发送时强制回到最新，确保用户能看到自己的提问
   scrollToBottom(true)
 
-  const url = buildStreamUrl(fullMsg, currentConversationId.value || undefined)
+  const url = buildStreamUrl(fullMsg, currentConversationId.value || undefined, reuseUserMessage)
   eventSource = new EventSource(url)
-  let metaParsed = false
 
   eventSource.onmessage = (event) => {
     // 注意: 不能用 !event.data 判断, 因为纯换行 token 的 data 就是 "\n"(真值) 或 ""(空行标记)
     if (event.data === undefined || event.data === null) return
-    if (!metaParsed) {
-      metaParsed = true
-      try {
-        const meta = JSON.parse(event.data)
-        if (meta.conversationId) {
-          currentConversationId.value = meta.conversationId
+    const raw = event.data
+    // 控制帧（会话元数据 / RAG 检索元数据）以 JSON 发送，正文 token 原样拼接
+    if (raw.startsWith('{')) {
+      const control = tryParseControlFrame(raw)
+      if (control) {
+        if (control.conversationId) {
+          currentConversationId.value = control.conversationId
+          localStorage.setItem('currentConversationId', String(control.conversationId))
           loadConversations()
-          return
         }
-      } catch (e) {
-        // 首帧非 JSON, 按内容处理
+        if (control.__rag) {
+          streamRagMeta.value = {
+            resultCount: Number(control.resultCount) || 0,
+            topK: Number(control.topK) || 0,
+            threshold: control.threshold,
+            latencyMs: control.latencyMs,
+            keywordFallback: control.keywordFallback,
+            topScore: control.topScore ?? null,
+            candidateCount: control.candidateCount
+          }
+        }
+        return
       }
     }
     // 直接拼接: SSE 已将 token 内的换行拆分为多个 data 行并由 EventSource 还原为 \n
     // 追加额外 \n 会破坏 markdown 连续文本 (每个 token 独立成段)
-    streamingMsg.value += event.data
+    streamingMsg.value += raw
   }
 
   eventSource.onerror = () => {
-    stopGeneration()
+    // 服务端结束推送或连接异常：以服务端数据为准刷新消息（同时拿到真实消息 ID，供编辑/重新生成使用）
+    finishStream(true)
   }
 }
 
+/**
+ * 尝试把一段文本解析为 SSE 控制帧。
+ * <p>仅当 JSON 对象包含 conversationId 或 __rag 字段时才视为控制帧，
+ * 避免把模型输出的 JSON 正文误吞。</p>
+ */
+function tryParseControlFrame(text: string): any | null {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return null
+  try {
+    const obj = JSON.parse(trimmed)
+    if (obj && typeof obj === 'object' && ('conversationId' in obj || '__rag' in obj)) {
+      return obj
+    }
+  } catch {
+    // 非 JSON，按正文处理
+  }
+  return null
+}
+
+/** 用户点击“停止”：中止生成，保留已流式输出的部分内容（不与服务端同步） */
 function stopGeneration() {
+  finishStream(false)
+}
+
+/**
+ * 结束一次流式会话。
+ *
+ * @param syncWithServer 为 true 时从服务端重新拉取消息（自然结束/异常断开，服务端已落库）；
+ *                       为 false 时（用户主动停止）保留本地已生成的部分内容
+ */
+function finishStream(syncWithServer: boolean) {
   if (eventSource) {
     eventSource.close()
     eventSource = null
   }
-  if (streamingMsg.value) {
+  if (!syncWithServer && streamingMsg.value) {
     messages.value.push({
       id: Date.now(),
       conversationId: currentConversationId.value || 0,
       role: 'assistant',
       content: streamingMsg.value,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      ragMeta: streamRagMeta.value ?? undefined
     })
-    streamingMsg.value = ''
   }
+  streamingMsg.value = ''
+  streamRagMeta.value = null
   isStreaming.value = false
   loadConversations()
+  if (syncWithServer) {
+    refreshMessages()
+  }
+}
+
+/** 从服务端重新拉取当前会话消息，并为 AI 消息回填 RAG 标记 */
+async function refreshMessages() {
+  const convId = currentConversationId.value
+  if (!convId) return
+  try {
+    const msgs = await conversationApi.listMessages(convId)
+    messages.value = msgs.map(m => ({
+      ...m,
+      content: m.intent === 'QUIZ' || m.intent === 'quiz' ? hideQuizAnswers(m.content) : m.content
+    }))
+    await attachRagMeta(convId)
+  } catch (e) {
+    console.error(e)
+  }
+}
+
+/** 拉取会话的 RAG 检索日志，把检索命中情况附着到对应的 AI 消息上（刷新后仍可见） */
+async function attachRagMeta(convId: number) {
+  try {
+    const logs = await ragApi.listRagLogs(convId)
+    if (!logs || logs.length === 0) return
+    // 日志按时间倒序返回，用队列逐个匹配最近的用户消息
+    const pool = [...logs].sort((a, b) => b.id - a.id)
+    for (let i = messages.value.length - 1; i >= 1; i--) {
+      const assistant = messages.value[i]
+      if (assistant.role !== 'assistant') continue
+      const userMsg = messages.value[i - 1]
+      if (!userMsg || userMsg.role !== 'user') continue
+      const normalized = normalizeQuery(userMsg.content)
+      const idx = pool.findIndex(log => queryMatches(normalized, normalizeQuery(log.query)))
+      if (idx >= 0) {
+        const log = pool[idx]
+        pool.splice(idx, 1)
+        assistant.ragMeta = {
+          resultCount: log.resultCount,
+          topK: log.topK,
+          threshold: log.similarityThreshold,
+          latencyMs: log.latencyMs
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[rag] 加载检索日志失败', e)
+  }
+}
+
+/** 去掉课程前缀与首尾空白，便于将检索日志 query 与用户消息内容对齐 */
+function normalizeQuery(text: string) {
+  return (text || '').replace(/^\[课程:[^\]]*\]\s*/, '').replace(/[？?。.!！\s]+$/, '').trim()
+}
+
+/**
+ * 判断用户消息与检索日志 query 是否指向同一条提问。
+ * <p>意图识别可能只把“概念词”传给检索（如“子网掩码”），而消息是完整句子，
+ * 因此采用相等或包含关系做容错匹配。</p>
+ */
+function queryMatches(userContent: string, logQuery: string) {
+  if (!userContent || !logQuery) return false
+  return userContent === logQuery || userContent.includes(logQuery) || logQuery.includes(userContent)
+}
+
+// ---------- 消息操作：复制 / 编辑 / 重新生成 ----------
+
+/** 复制文本到剪贴板（含非安全上下文兜底） */
+async function copyText(text: string) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text)
+    } else {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    ElMessage.success('已复制')
+  } catch (e) {
+    console.error(e)
+    ElMessage.error('复制失败，请手动选择文本复制')
+  }
+}
+
+/** 进入编辑态：把用户消息替换为可编辑文本框 */
+function startEdit(index: number) {
+  if (isStreaming.value) return
+  const msg = messages.value[index]
+  if (!msg || msg.role !== 'user') return
+  editingIndex.value = index
+  editingText.value = msg.content
+}
+
+function cancelEdit() {
+  editingIndex.value = null
+  editingText.value = ''
+}
+
+/** 保存编辑：截断该消息及其之后的消息，再以新内容重新发送 */
+async function submitEdit() {
+  const index = editingIndex.value
+  if (index == null) return
+  const text = editingText.value.trim()
+  if (!text) {
+    ElMessage.warning('内容不能为空')
+    return
+  }
+  const target = messages.value[index]
+  editingIndex.value = null
+  try {
+    if (target && isPersistedId(target.id)) {
+      await conversationApi.truncateMessages(target.id)
+    }
+  } catch (e) {
+    console.error(e)
+    ElMessage.error('操作失败，请重试')
+    return
+  }
+  messages.value.splice(index)
+  sendMessage(text)
+}
+
+/** 是否可以重新生成：该 AI 消息前面存在一条用户消息 */
+function canRegenerate(index: number): boolean {
+  const prev = messages.value[index - 1]
+  return !!prev && prev.role === 'user'
+}
+
+/** 重新生成：截断该 AI 回复及其后续消息，复用上一条用户消息重新生成（不重复插入提问） */
+async function regenerate(index: number) {
+  if (isStreaming.value) return
+  const assistant = messages.value[index]
+  const prevUser = messages.value[index - 1]
+  if (!assistant || assistant.role !== 'assistant' || !prevUser || prevUser.role !== 'user') return
+  try {
+    if (isPersistedId(assistant.id)) {
+      await conversationApi.truncateMessages(assistant.id)
+    }
+  } catch (e) {
+    console.error(e)
+    ElMessage.error('操作失败，请重试')
+    return
+  }
+  // 仅移除本地 AI 回复及其后续内容，保留用户提问
+  messages.value.splice(index)
+  startStream(prevUser.content, true)
+}
+
+/** 判断消息 ID 是否为服务端持久化 ID（本地临时 ID 为 Date.now() 时间戳） */
+function isPersistedId(id: number) {
+  return typeof id === 'number' && id > 0 && id < 1e12
 }
 
 function handleScroll() {
@@ -510,6 +814,7 @@ function hideQuizAnswers(text: string): string {
   line-height: 1.7;
   font-size: 14px;
   word-break: break-word;
+  position: relative;
   animation: msg-in var(--t-normal) var(--ease-spring) both;
 }
 @keyframes msg-in {
@@ -544,6 +849,108 @@ function hideQuizAnswers(text: string): string {
 @keyframes blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
+}
+/* RAG 检索标记: 附着在 AI 消息顶部，展示知识库命中情况 */
+.rag-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-bottom: 10px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--color-primary-50);
+  border: 1px solid var(--color-primary-100);
+  color: var(--color-primary-dark);
+  font-size: 12px;
+  line-height: 1.6;
+  cursor: default;
+  user-select: none;
+}
+.rag-content {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.rag-content .el-icon {
+  font-size: 13px;
+}
+.rag-sep {
+  color: var(--color-muted-foreground);
+}
+.rag-tip p {
+  margin: 0 0 4px;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.rag-tip p:last-child {
+  margin-bottom: 0;
+}
+/* 消息操作条: 常态可见（触屏可用），悬停高亮 */
+.msg-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-top: 6px;
+  opacity: 0.55;
+  transition: opacity var(--t-fast) var(--ease);
+}
+.msg:hover .msg-actions,
+.msg:focus-within .msg-actions {
+  opacity: 1;
+}
+.act-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-muted-foreground);
+  font-size: 14px;
+  cursor: pointer;
+  transition: all var(--t-fast) var(--ease);
+}
+.act-btn:hover:not(:disabled) {
+  background: var(--color-primary-50);
+  color: var(--color-primary);
+}
+.act-btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+.act-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+/* 用户消息气泡为渐变紫底，操作按钮使用反白色 */
+.msg.user .act-btn {
+  color: rgba(255, 255, 255, 0.85);
+}
+.msg.user .act-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+/* 编辑态: 消息气泡内展开的输入框 */
+.edit-box {
+  width: min(560px, 58vw);
+}
+.edit-box :deep(.el-textarea__inner) {
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  line-height: 1.6;
+}
+.edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+.msg.user .edit-actions :deep(.el-button:not(.el-button--primary)) {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.4);
+  color: #fff;
 }
 .welcome-msg {
   position: relative;

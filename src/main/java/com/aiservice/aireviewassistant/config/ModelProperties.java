@@ -17,6 +17,13 @@ public class ModelProperties {
     /** 模型名称，默认 {@code qwen-plus}。 */
     private String name = "qwen-plus";
 
+    /**
+     * 快速模型名称，默认 {@code qwen-turbo}。
+     * <p>用于对响应速度敏感、对措辞要求不高的场景（如批量出题），速度约为 qwen-plus 的 4-5 倍。
+     * 为空时回退到 {@link #name}。</p>
+     */
+    private String fastName = "qwen-turbo";
+
     /** 模型温度参数，默认 {@code 0.9}；值越大生成结果越随机。 */
     private Double temperature = 0.9;
 
@@ -40,6 +47,14 @@ public class ModelProperties {
 
     public void setName(String name) {
         this.name = name;
+    }
+
+    public String getFastName() {
+        return fastName;
+    }
+
+    public void setFastName(String fastName) {
+        this.fastName = fastName;
     }
 
     public Double getTemperature() {

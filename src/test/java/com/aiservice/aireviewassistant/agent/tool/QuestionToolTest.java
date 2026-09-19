@@ -54,19 +54,22 @@ class QuestionToolTest {
 
     /**
      * 测试场景：通过 stream 方法获取流式回答。
-     * 准备条件：构造包含流式问题的 ToolContext，并模拟 RagService 返回字符流。
-     * 断言意图：流式输出应依次包含预期的字符，并最终正常完成。
+     * 准备条件：构造包含流式问题的 ToolContext，并模拟 RagService 返回字符流与检索元数据。
+     * 断言意图：首帧应为 RAG 元数据帧，后续流依次包含预期字符，并最终正常完成。
      */
     @Test
     void shouldStreamAnswer() {
         ToolContext context = new ToolContext("解释范式", 200, null, null);
-        // 模拟 RagService 返回包含两个字符的 Flux 流
-        when(ragService.answerQuestionStream("解释范式", 200)).thenReturn(Flux.just("范", "式"));
+        // 模拟检索元数据与答案流
+        RagService.RagMeta meta = new RagService.RagMeta(1, 1, 3, 0.5, 12L, false, 0.81);
+        when(ragService.answerQuestionStreamWithMeta("解释范式", 200))
+            .thenReturn(new RagService.RagAnswer(meta, Flux.just("范", "式")));
 
         Flux<String> result = questionTool.stream(context);
 
-        // 使用 StepVerifier 验证流依次输出“范”“式”后正常完成
+        // 首帧为元数据帧，随后依次输出“范”“式”
         StepVerifier.create(result)
+            .expectNext(meta.toSseJson())
             .expectNext("范", "式")
             .verifyComplete();
     }

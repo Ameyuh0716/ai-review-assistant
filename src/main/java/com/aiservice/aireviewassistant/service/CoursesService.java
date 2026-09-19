@@ -19,4 +19,13 @@ public interface CoursesService extends IService<Courses> {
      * @return 该用户的课程列表；无记录时返回空列表
      */
     List<Courses> listByUserId(Integer userId);
+
+    /**
+     * 根据课程名称由 AI 生成一段简短的课程描述。
+     * <p>用于新建课程未填写描述时自动补全；生成失败时返回兜底描述，不抛异常。</p>
+     *
+     * @param courseName 课程名称
+     * @return 生成的课程描述文本
+     */
+    String generateDescription(String courseName);
 }

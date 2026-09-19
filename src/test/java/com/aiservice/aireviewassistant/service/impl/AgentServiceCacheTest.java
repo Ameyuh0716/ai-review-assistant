@@ -43,6 +43,14 @@ class AgentServiceCacheTest {
     @MockBean
     private ChatClient chatClient;
 
+    /**
+     * 快速模型客户端 mock。
+     * <p>QuizService 注入的是 {@code fastChatClient}（出题使用快速模型），
+     * 若不同时 mock，测试将穿透到真实 DashScope API（实测会卡住两分多钟后报错）。</p>
+     */
+    @MockBean(name = "fastChatClient")
+    private ChatClient fastChatClient;
+
     @MockBean
     private PromptTemplate promptTemplate;
 
@@ -61,10 +69,20 @@ class AgentServiceCacheTest {
      * @param response 期望 ChatClient 返回的字符串
      */
     private void stubChatClient(String response) {
+        stubChatClient(chatClient, response);
+    }
+
+    /**
+     * 统一桩函数：模拟指定 ChatClient 的调用链，固定返回指定的 LLM 内容。
+     *
+     * @param client   目标 ChatClient（主客户端或快速客户端）
+     * @param response 期望返回的字符串
+     */
+    private void stubChatClient(ChatClient client, String response) {
         // 固定提示词模板渲染结果，避免真实模板逻辑依赖
         when(promptTemplate.render(anyString(), any())).thenReturn("prompt");
         // 模拟 ChatClient 调用链：prompt() -> requestSpec -> system/user/call -> content
-        when(chatClient.prompt()).thenReturn(requestSpec);
+        when(client.prompt()).thenReturn(requestSpec);
         when(requestSpec.system(anyString())).thenReturn(requestSpec);
         when(requestSpec.user(anyString())).thenReturn(requestSpec);
         when(requestSpec.call()).thenReturn(callResponseSpec);
@@ -78,7 +96,8 @@ class AgentServiceCacheTest {
      */
     @Test
     void shouldCacheQuizResult() {
-        stubChatClient("题目内容");
+        // 出题走快速模型客户端（fastChatClient），需对其单独打桩
+        stubChatClient(fastChatClient, "题目内容");
 
         // 第一次调用生成测验
         String first = quizService.generateQuiz("数据库范式", 3);
@@ -88,7 +107,7 @@ class AgentServiceCacheTest {
         // 验证两次结果相同
         assertThat(first).isEqualTo(second);
         // 验证底层 LLM 仅被调用一次，缓存减少了重复请求
-        verify(chatClient, times(1)).prompt();
+        verify(fastChatClient, times(1)).prompt();
     }
 
     /**

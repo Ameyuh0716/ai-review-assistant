@@ -2,8 +2,10 @@ package com.aiservice.aireviewassistant.service.impl;
 
 import com.aiservice.aireviewassistant.config.PromptTemplate;
 import com.aiservice.aireviewassistant.service.QuizService;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
@@ -21,6 +23,11 @@ import java.util.regex.Pattern;
  * 基于 Spring AI {@link ChatClient} 调用大模型生成题目，并通过本地正则解析与格式化逻辑，
  * 将模型返回的非结构化文本转换为统一 Markdown 格式。支持缓存、同步生成、批量生成与流式生成。
  * </p>
+ * <p>
+ * 出题使用<b>快速模型</b>（{@code ai.model.fast-name}，默认 qwen-turbo）：
+ * 实测同样 5 道题 qwen-turbo 约 4 秒而 qwen-plus 需 17 秒以上，且 qwen-plus 输出更冗长；
+ * 出题对措辞要求不高，速度收益明显。
+ * </p>
  */
 @Slf4j
 @Service
@@ -28,16 +35,20 @@ public class QuizServiceImpl implements QuizService {
 
     private final ChatClient chatClient;
     private final PromptTemplate promptTemplate;
+    private final ObjectMapper objectMapper;
 
     /**
      * 构造题目生成服务。
      *
-     * @param chatClient     Spring AI 聊天客户端，用于调用大模型
+     * @param chatClient     快速模型聊天客户端（用于出题，速度优先）
      * @param promptTemplate 提示词模板渲染器，用于加载 quiz-system.txt / quiz-user.txt
+     * @param objectMapper   JSON 工具，用于构造流式结束时的格式化控制帧
      */
-    public QuizServiceImpl(ChatClient chatClient, PromptTemplate promptTemplate) {
+    public QuizServiceImpl(@Qualifier("fastChatClient") ChatClient chatClient,
+                           PromptTemplate promptTemplate, ObjectMapper objectMapper) {
         this.chatClient = chatClient;
         this.promptTemplate = promptTemplate;
+        this.objectMapper = objectMapper;
     }
 
     @Override
@@ -75,6 +86,51 @@ public class QuizServiceImpl implements QuizService {
                 // 避免 SSE 按字符传输出丢失换行/缩进。
                 return Flux.just(formatted);
             });
+    }
+
+    /**
+     * 流式生成题目：原始 token 实时下发，全部完成后追加 JSON 格式化帧。
+     * <p>
+     * 执行流程：
+     * <ol>
+     *   <li>调用快速模型流式接口，token 到达即转发给前端（用户立即看到生成过程，而非“白屏等待”）；</li>
+     *   <li>同时用 {@link StringBuilder} 聚合完整原始输出；</li>
+     *   <li>流结束后追加一帧 {@code {"__quizFinal":true,"content":"..."}}，
+     *       前端据此解析出结构化题目。</li>
+     * </ol>
+     * </p>
+     *
+     * @param topic 知识点主题
+     * @param count 期望生成的题目数量
+     * @return 实时 token 流 + 末尾 JSON 格式化帧
+     */
+    @Override
+    public Flux<String> generateQuizStreamWithFinal(String topic, int count) {
+        String prompt = buildQuizPrompt(topic, count);
+        String systemPrompt = promptTemplate.render("quiz-system.txt", null);
+        StringBuilder buffer = new StringBuilder();
+        Flux<String> tokenStream = chatClient.prompt()
+            .system(systemPrompt)
+            .user(prompt)
+            .stream()
+            .content()
+            .doOnNext(buffer::append);
+        // concat 保证格式化帧一定在模型输出全部结束后才发送
+        return Flux.concat(tokenStream, Flux.defer(() -> {
+            String formatted = formatQuizOutput(buffer.toString(), topic);
+            log.debug("[Quiz] 流式出题完成：topic={}, count={}, 原始长度={}, 格式化长度={}",
+                topic, count, buffer.length(), formatted.length());
+            String frame;
+            try {
+                // content 使用 JSON 转义，保证 markdown 中的引号/换行不会破坏帧结构
+                frame = "{\"__quizFinal\":true,\"content\":"
+                    + objectMapper.writeValueAsString(formatted) + "}";
+            } catch (Exception e) {
+                log.warn("[Quiz] 序列化格式化帧失败，回退为纯文本下发: {}", e.getMessage());
+                frame = formatted;
+            }
+            return Flux.just(frame);
+        }));
     }
 
     /**
@@ -186,6 +242,11 @@ public class QuizServiceImpl implements QuizService {
 
         String formatted = result.toString().trim();
         int actualCount = Math.max(0, index - 1);
+        // 解析零题时不能返回空串：保留模型原文，避免前端拿到空白内容后“生成测验无反应”
+        if (actualCount == 0) {
+            log.warn("[Quiz] 未解析出有效题目（块数={}），返回模型原文。topic={}", blocks.size(), topic);
+            return raw.trim();
+        }
         log.debug("[Quiz] 格式化完成：topic={}, hideAnswer={}, 原始块数={}, 有效题目数={}", topic, hideAnswer, blocks.size(), actualCount);
         return formatted;
     }
