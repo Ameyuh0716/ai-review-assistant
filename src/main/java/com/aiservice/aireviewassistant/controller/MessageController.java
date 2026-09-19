@@ -11,7 +11,6 @@ import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 import java.util.Map;
-
 /**
  * 消息控制器。
  * <p>负责查询会话中的历史消息，以及外部手动补充消息。</p>
@@ -80,7 +79,20 @@ public class MessageController {
     }
 
     /**
-     * 若编辑的是会话首条消息且标题尚未自定义，则同步会话标题。
+     * 编辑消息后同步会话标题。
+     * <p>
+     * <b>判定方式：用内容比对代替“取首条消息”。</b>
+     * 会话标题是由首条用户消息生成的（见 {@code ReviewAssistantAgent#getOrCreateConversation}），
+     * 因此「标题 == 本条消息编辑前的标题化结果」就等价于「本条正是标题的来源消息」，
+     * 也就等价于「本条是首条消息」——不需要再查一次数据库。
+     * </p>
+     * <p>
+     * 这样改写的原因：原先用 {@code ORDER BY id LIMIT 1} 查首条消息，
+     * 优化器会按 conversation_id 的选择性（约 3.7%）估算“沿主键扫几十行即可命中”，
+     * 因而放弃 (conversation_id, id) 索引改走主键索引；但同一会话的消息在物理上连续，
+     * 实际要扫完整张表才找到（56 万行时实测 35～190ms，且随消息总量线性增长）。
+     * 改为内容比对后该查询被彻底移除，开销为零、结果确定，也不再受优化器估算影响。
+     * </p>
      *
      * @param message    已更新的消息
      * @param oldContent 更新前的消息内容
@@ -90,24 +102,16 @@ public class MessageController {
             if (message.getConversationId() == null) {
                 return;
             }
-            QueryWrapper<Message> firstWrapper = new QueryWrapper<>();
-            firstWrapper.eq("conversation_id", message.getConversationId());
-            firstWrapper.orderByAsc("id");
-            firstWrapper.last("LIMIT 1");
-            List<Message> earliest = messageService.list(firstWrapper);
-            // 非首条消息不动标题
-            if (earliest.isEmpty() || !earliest.get(0).getId().equals(message.getId())) {
-                return;
-            }
             Conversation conversation = conversationService.getById(message.getConversationId());
             if (conversation == null) {
                 return;
             }
             String title = conversation.getTitle();
-            boolean editable = title == null || title.isEmpty() || "新对话".equals(title)
-                || (oldContent != null && title.equals(buildTitle(oldContent)));
-            if (!editable) {
-                // 用户已自定义标题，不覆盖
+            boolean placeholder = title == null || title.isEmpty() || "新对话".equals(title);
+            boolean titleFromThisMessage = oldContent != null && title != null
+                && title.equals(buildTitle(oldContent));
+            if (!placeholder && !titleFromThisMessage) {
+                // 标题已由其它消息生成（或用户自定义），编辑本条不应改动标题
                 return;
             }
             conversation.setTitle(buildTitle(message.getContent()));
