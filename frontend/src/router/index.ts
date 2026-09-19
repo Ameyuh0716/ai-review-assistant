@@ -3,6 +3,13 @@ import { useAuthStore } from '@/stores/auth'
 
 const router = createRouter({
   history: createWebHistory(),
+  /**
+   * 切换栏目时回到页面顶部。
+   * 与 App.vue 的页面过渡配合：新页面从顶部开始淡入，避免"停留在上一页的滚动位置"。
+   */
+  scrollBehavior() {
+    return { top: 0, behavior: 'auto' }
+  },
   routes: [
     {
       path: '/login',

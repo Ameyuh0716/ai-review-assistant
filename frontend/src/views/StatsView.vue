@@ -122,7 +122,11 @@
             </div>
           </div>
           <p class="question">{{ item.question }}</p>
-          <p class="answer">你的答案：{{ item.userAnswer || '未作答' }} | 正确答案：{{ item.correctAnswer }}</p>
+          <!-- 未重做前不展示正确答案，避免“看着答案复习” -->
+          <p class="answer">
+            你的答案：{{ item.userAnswer || '未作答' }}
+            <span class="answer-hidden">· 正确答案在重做提交后揭晓</span>
+          </p>
           <div class="item-footer">
             <span class="detail-link">点击查看详情并重做</span>
           </div>
@@ -158,7 +162,7 @@
             <span class="opt-text">{{ opt.text }}</span>
           </div>
         </div>
-        <p v-else class="no-options">（该题未存储选项，请根据下方答案自行复盘）</p>
+        <p v-else class="no-options">（该题未存储选项，无法重做，可查看解析后自行复盘）</p>
 
         <div v-if="redoResult" :class="['redo-result', redoResult.correct ? 'ok' : 'bad']">
           <p class="redo-title">
@@ -169,10 +173,13 @@
           </p>
           <p class="redo-exp">解析：{{ redoResult.explanation || '暂无解析' }}</p>
         </div>
+        <!--
+          未提交前只展示自己上次的作答；正确答案与解析在提交后揭晓，
+          避免“看着答案重做”导致复习效果失真。
+        -->
         <div v-else class="history-info">
-          <p>上次你的答案：<strong>{{ detailItem.userAnswer || '未作答' }}</strong> ｜ 正确答案：<strong>{{ detailItem.correctAnswer }}</strong></p>
-          <p v-if="detailItem.explanation" class="history-exp">解析：{{ detailItem.explanation }}</p>
-          <p class="redo-hint">选择一个选项后点击“提交重做”，答对将自动标记为已掌握</p>
+          <p>上次你的答案：<strong>{{ detailItem.userAnswer || '未作答' }}</strong></p>
+          <p class="redo-hint">请选择一个选项后点击“提交重做”，提交后才会展示对错与解析</p>
         </div>
       </div>
       <template #footer>
@@ -529,6 +536,9 @@ function retryRedo() {
   color: var(--color-muted-foreground);
   font-size: 13px;
   margin: 0 0 8px;
+}
+.answer-hidden {
+  color: var(--color-primary);
 }
 .item-footer {
   display: flex;

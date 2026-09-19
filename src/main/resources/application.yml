@@ -72,11 +72,21 @@ app:
     refresh-expiration-ms: 604800000   # 7天
   conversation:
     expire-days: 30  # 会话过期天数，超过后自动清理
+  stats:
+    # 闲聊（你好/谢谢等社交性对话）不计入复习统计，避免虚增复习次数与综合评分
+    # 与课程相关的实质问答仍会正常统计
+    skip-casual-chat: true
   rag:
     top-k: 3                      # RAG 默认召回数量
-    similarity-threshold: 0.5     # 向量相似度阈值
+    # 相似度阈值 0.55：实测（DashScope text-embedding + 本库 25 分块）分数呈双峰分布——
+    #   真实命中：0.577 / 0.595 / 0.845   无关“擦边”内容：0.504~0.528
+    # 0.55 恰好位于二者之间：能挡住“链表→二叉搜索树”这类同专业但不同知识点的误召回，
+    # 同时保留全部真实命中。调低到 0.5 会重新引入误报，调高到 0.6 会丢失真实命中。
+    similarity-threshold: 0.55
     rerank-enabled: true          # 是否启用关键词重排序
-    rerank-candidate-multiplier: 2  # 重排序候选倍数
+    # 候选倍数 3：同一资料可能被导入多个课程，按内容去重后需要更多候选
+    # 才能用不同的片段填满 TopK（倍数过小会导致最终只剩 1 条不同片段）
+    rerank-candidate-multiplier: 3
 
 # Actuator 与 Micrometer 配置
 management:

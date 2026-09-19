@@ -50,9 +50,9 @@ export function listMessages(conversationId: number) {
 }
 
 /**
- * 截断会话消息：删除指定消息及其之后的所有消息。
- * 用于“编辑并重新发送”与“重新生成”功能。
+ * 更新指定消息的内容（“编辑提问”场景）。
+ * 只修改该条文本，不删除任何历史记录。
  */
-export function truncateMessages(messageId: number) {
-  return del<boolean>(`/api/messages/${messageId}/truncate`)
+export function updateMessage(messageId: number, content: string) {
+  return put<Message>(`/api/messages/${messageId}`, { content })
 }

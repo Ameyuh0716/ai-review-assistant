@@ -38,6 +38,20 @@ public class QuizServiceImpl implements QuizService {
     private final ObjectMapper objectMapper;
 
     /**
+     * 冗余学科前缀匹配：开头的短词（2-10 个中英文字符）+ 空白 + 剩余题干。
+     * <p>用于识别并剥离模型重复输出的学科名（如"操作系统 在操作系统中，…"）。</p>
+     */
+    private static final Pattern PREFIX_PATTERN =
+        Pattern.compile("^([\\u4e00-\\u9fa5A-Za-z]{2,10})\\s+(.+)$", Pattern.DOTALL);
+
+    /**
+     * 题干常见引导词：中文题干通常直接以"在/以下/下列…"开始，且不会在这些词前留空格。
+     * <p>若"短词 + 空格"后的剩余文本以此类词开头，则该短词判为模型附加的冗余学科前缀。</p>
+     */
+    private static final Pattern QUESTION_LEAD_PATTERN =
+        Pattern.compile("^(?:在|以下|下列|下述|关于|某|若|设|对于|属于|哪|哪一|什么|下列哪).*", Pattern.DOTALL);
+
+    /**
      * 构造题目生成服务。
      *
      * @param chatClient     快速模型聊天客户端（用于出题，速度优先）
@@ -386,6 +400,7 @@ public class QuizServiceImpl implements QuizService {
         questionText = questionText.replaceFirst("^(?:" + Pattern.quote(subject) + "[：:]?\\s*)", "")
                                    .replaceAll("\\s*\\n\\s*", " ")
                                    .trim();
+        questionText = stripRedundantSubjectPrefix(questionText);
 
         // 解析拆成列表，清理 markdown 列表/加粗标记
         List<String> explanations = new ArrayList<>();
@@ -407,6 +422,40 @@ public class QuizServiceImpl implements QuizService {
         if (options.isEmpty()) return null;
 
         return new Question(subject, questionText, options, answer, explanations);
+    }
+
+    /**
+     * 剥离题干开头多余的学科前缀。
+     * <p>
+     * 模型（尤其是快速模型）偶尔会把课程/学科名重复写在题干前，例如
+     * {@code "操作系统 在操作系统中，进程的基本状态不包括…"} 或
+     * {@code "计算机组成原理 以下哪项是…"}。满足以下任一条件时判为冗余前缀并剥离：
+     * <ol>
+     *   <li>开头短词在后续题干中<b>再次出现</b>（重复强调特征）；</li>
+     *   <li>剩余文本以典型题干引导词开头（在/以下/下列/关于/若/设…），
+     *       且开头短词长度 ≥ 3 字（中文题干不会在引导词前留"短词 + 空格"）。</li>
+     * </ol>
+     * 两条规则都不满足时保留原文，避免误伤正常题干。
+     * </p>
+     *
+     * @param questionText 原始题干
+     * @return 剥离冗余前缀后的题干
+     */
+    private String stripRedundantSubjectPrefix(String questionText) {
+        if (questionText == null || questionText.isEmpty()) {
+            return questionText;
+        }
+        Matcher prefixMatcher = PREFIX_PATTERN.matcher(questionText);
+        if (prefixMatcher.matches()) {
+            String head = prefixMatcher.group(1);
+            String rest = prefixMatcher.group(2);
+            boolean duplicated = rest.contains(head);
+            boolean leadWord = head.length() >= 3 && QUESTION_LEAD_PATTERN.matcher(rest).matches();
+            if (duplicated || leadWord) {
+                return rest.trim();
+            }
+        }
+        return questionText;
     }
 
     /**

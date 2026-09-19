@@ -4,6 +4,7 @@ import com.aiservice.aireviewassistant.agent.tool.AgentTool;
 import com.aiservice.aireviewassistant.agent.tool.ChainExecutor;
 import com.aiservice.aireviewassistant.agent.tool.ToolContext;
 import com.aiservice.aireviewassistant.agent.tool.ToolRegistry;
+import com.aiservice.aireviewassistant.config.AppProperties;
 import com.aiservice.aireviewassistant.config.PromptTemplate;
 import com.aiservice.aireviewassistant.entity.Conversation;
 import com.aiservice.aireviewassistant.entity.Message;
@@ -37,6 +38,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.RETURNS_SELF;
@@ -81,6 +83,9 @@ class ReviewAssistantAgentTest {
     private ChainExecutor chainExecutor;
 
     @Mock
+    private AppProperties appProperties;
+
+    @Mock
     private ChatClient.ChatClientRequestSpec requestSpec;
 
     @Mock
@@ -100,6 +105,8 @@ class ReviewAssistantAgentTest {
         // 设置会话主键与用户标识，供后续逻辑使用
         conversation.setId(1);
         conversation.setUserId("default_user");
+        // 学习统计配置：与 application.yml 默认一致（开启闲聊过滤）
+        lenient().when(appProperties.getStats()).thenReturn(new AppProperties.Stats());
     }
 
     /**
@@ -143,6 +150,77 @@ class ReviewAssistantAgentTest {
         assertThat(result).isEqualTo("你好，同学！");
         // 验证 CHAT 工具被实际执行
         verify(chatTool).execute(any(ToolContext.class));
+    }
+
+    /**
+     * 测试场景：闲聊消息不应计入复习统计。
+     * <p>准备条件：输入问候语"你好"，命中 CHAT 工具并正常执行。</p>
+     * <p>断言意图：虽然对话正常完成，但复习记录服务不被调用，避免虚增复习次数与综合评分。</p>
+     */
+    @Test
+    void shouldNotRecordReviewForCasualChat() {
+        // 模拟消息历史为空
+        mockMessageQuery();
+        when(conversationService.getById(anyInt())).thenReturn(conversation);
+        when(toolRegistry.getTool("CHAT")).thenReturn(chatTool);
+        when(chatTool.validate(any())).thenReturn(true);
+        when(chatTool.execute(any())).thenReturn("你好！我可以帮你复习。");
+
+        agent.chat("你好", 1);
+
+        // 闲聊不应写入复习记录
+        verify(reviewRecordsService, never()).saveFromAgent(any(), any(), any(), any());
+    }
+
+    /**
+     * 测试场景：问候语变体同样被判为闲聊。
+     * <p>准备条件：输入"谢谢老师"，命中 CHAT 工具。</p>
+     * <p>断言意图：归一化后命中社交短语，复习记录不被写入。</p>
+     */
+    @Test
+    void shouldNotRecordReviewForCasualVariant() {
+        mockMessageQuery();
+        when(conversationService.getById(anyInt())).thenReturn(conversation);
+        when(toolRegistry.getTool("CHAT")).thenReturn(chatTool);
+        when(chatTool.validate(any())).thenReturn(true);
+        when(chatTool.execute(any())).thenReturn("不客气～");
+
+        agent.chat("谢谢老师", 1);
+
+        verify(reviewRecordsService, never()).saveFromAgent(any(), any(), any(), any());
+    }
+
+    /**
+     * 测试场景：含实质内容但被识别为普通对话的消息应计入复习统计。
+     * <p>准备条件：带历史消息输入"继续"，LLM 返回 CHAT 意图。</p>
+     * <p>断言意图：该消息不属于闲聊，复习记录正常写入（学习内容不被误过滤）。</p>
+     */
+    @Test
+    void shouldRecordReviewForSubstantiveChat() {
+        // 构造一条历史消息，触发 LLM 意图识别路径
+        Message lastMessage = new Message();
+        lastMessage.setRole("assistant");
+        lastMessage.setContent("上一轮回答");
+        lastMessage.setIntent("QUESTION");
+        LambdaQueryChainWrapper<Message> wrapper = mockMessageQuery();
+        when(wrapper.list()).thenReturn(List.of(lastMessage));
+        when(conversationService.getById(2)).thenReturn(conversation);
+        when(toolRegistry.buildToolSchemas()).thenReturn("CHAT - 对话");
+        lenient().when(promptTemplate.render(anyString(), any(Map.class))).thenReturn("prompt");
+        lenient().when(chatClient.prompt()).thenReturn(requestSpec);
+        lenient().when(requestSpec.system(anyString())).thenReturn(requestSpec);
+        lenient().when(requestSpec.user(anyString())).thenReturn(requestSpec);
+        lenient().when(requestSpec.call()).thenReturn(callResponseSpec);
+        lenient().when(callResponseSpec.content()).thenReturn("{\"intent\":\"CHAT\",\"parameters\":{}}");
+        when(toolRegistry.getTool("CHAT")).thenReturn(chatTool);
+        when(chatTool.validate(any())).thenReturn(true);
+        when(chatTool.execute(any())).thenReturn("继续讲解的内容");
+
+        agent.chat("继续", 2);
+
+        // 非闲聊的普通对话应正常写入复习记录
+        verify(reviewRecordsService, times(1))
+            .saveFromAgent(any(), any(), eq("继续"), anyString());
     }
 
     /**

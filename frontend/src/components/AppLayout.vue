@@ -25,18 +25,9 @@ const emit = defineEmits<{
   flex-direction: column;
   min-height: 100vh;
   position: relative;
-  background: var(--color-background);
-}
-/* 氛围背景: 顶部两侧柔和光晕 (紫罗兰 + 翠绿) */
-.app-layout::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 0;
-  background:
-    radial-gradient(560px 320px at 0% 0%, rgba(124, 58, 237, 0.07), transparent 65%),
-    radial-gradient(520px 300px at 100% 8%, rgba(5, 150, 105, 0.06), transparent 65%);
+  /* 背景透明：氛围光晕由 App.vue 的 .app-ambient 统一提供，
+     避免 fixed 元素落在过渡容器内（祖先 transform 会改变其锚点导致切换时滑动） */
+  background: transparent;
 }
 .main-content {
   position: relative;

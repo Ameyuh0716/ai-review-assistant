@@ -65,9 +65,9 @@ app:
     expire-days: 30
   rag:
     top-k: 5
-    similarity-threshold: 0.5
+    similarity-threshold: 0.55
     rerank-enabled: true
-    rerank-candidate-multiplier: 2
+    rerank-candidate-multiplier: 3
 
 # Actuator - 生产环境仅暴露必要端点
 management:

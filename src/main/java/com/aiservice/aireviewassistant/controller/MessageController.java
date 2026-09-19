@@ -1,30 +1,38 @@
 package com.aiservice.aireviewassistant.controller;
 
 import com.aiservice.aireviewassistant.common.ApiResponse;
+import com.aiservice.aireviewassistant.entity.Conversation;
 import com.aiservice.aireviewassistant.entity.Message;
+import com.aiservice.aireviewassistant.service.ConversationService;
 import com.aiservice.aireviewassistant.service.MessageService;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * 消息控制器。
  * <p>负责查询会话中的历史消息，以及外部手动补充消息。</p>
  */
+@Slf4j
 @RestController
 @RequestMapping("/api/messages")
 public class MessageController {
 
     private final MessageService messageService;
+    private final ConversationService conversationService;
 
     /**
-     * 构造方法，注入消息服务。
+     * 构造方法，注入消息服务与会话服务。
      *
-     * @param messageService 消息 CRUD 服务
+     * @param messageService      消息 CRUD 服务
+     * @param conversationService 会话 CRUD 服务（用于编辑首条消息时同步标题）
      */
-    public MessageController(MessageService messageService) {
+    public MessageController(MessageService messageService, ConversationService conversationService) {
         this.messageService = messageService;
+        this.conversationService = conversationService;
     }
 
     /**
@@ -41,6 +49,85 @@ public class MessageController {
         wrapper.eq("conversation_id", conversationId);
         wrapper.orderByAsc("created_at");
         return ApiResponse.success(messageService.list(wrapper));
+    }
+
+    /**
+     * 更新指定消息的内容（“编辑并重新发送”场景）。
+     * <p>HTTP: {@code PUT /api/messages/{id}}</p>
+     * <p>仅修改该条消息的文本，<b>不删除任何历史记录</b>：编辑后的上下文由前端在重新生成时
+     * 通过 {@code historyBeforeId} 截断，AI 回复则就地覆盖原行，整段对话记录完整保留。</p>
+     *
+     * @param id   消息 ID
+     * @param body 请求体，需包含 {@code content} 字段
+     * @return 更新后的消息；消息不存在或内容为空时返回 code 非 0
+     */
+    @PutMapping("/{id}")
+    public ApiResponse<Message> update(@PathVariable Integer id, @RequestBody Map<String, String> body) {
+        Message message = messageService.getById(id);
+        if (message == null) {
+            return new ApiResponse<>(1, "消息不存在", null);
+        }
+        String content = body != null ? body.get("content") : null;
+        if (content == null || content.trim().isEmpty()) {
+            return new ApiResponse<>(1, "内容不能为空", null);
+        }
+        String oldContent = message.getContent();
+        message.setContent(content.trim());
+        messageService.updateById(message);
+        // 编辑首条消息时，同步刷新会话标题，避免侧栏仍显示旧提问
+        syncConversationTitle(message, oldContent);
+        return ApiResponse.success(message);
+    }
+
+    /**
+     * 若编辑的是会话首条消息且标题尚未自定义，则同步会话标题。
+     *
+     * @param message    已更新的消息
+     * @param oldContent 更新前的消息内容
+     */
+    private void syncConversationTitle(Message message, String oldContent) {
+        try {
+            if (message.getConversationId() == null) {
+                return;
+            }
+            QueryWrapper<Message> firstWrapper = new QueryWrapper<>();
+            firstWrapper.eq("conversation_id", message.getConversationId());
+            firstWrapper.orderByAsc("id");
+            firstWrapper.last("LIMIT 1");
+            List<Message> earliest = messageService.list(firstWrapper);
+            // 非首条消息不动标题
+            if (earliest.isEmpty() || !earliest.get(0).getId().equals(message.getId())) {
+                return;
+            }
+            Conversation conversation = conversationService.getById(message.getConversationId());
+            if (conversation == null) {
+                return;
+            }
+            String title = conversation.getTitle();
+            boolean editable = title == null || title.isEmpty() || "新对话".equals(title)
+                || (oldContent != null && title.equals(buildTitle(oldContent)));
+            if (!editable) {
+                // 用户已自定义标题，不覆盖
+                return;
+            }
+            conversation.setTitle(buildTitle(message.getContent()));
+            conversationService.updateById(conversation);
+        } catch (Exception e) {
+            log.warn("[Message] 同步会话标题失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 按首条消息生成会话标题（超长截断）。
+     *
+     * @param content 消息内容
+     * @return 标题文本
+     */
+    private String buildTitle(String content) {
+        if (content == null) {
+            return "新对话";
+        }
+        return content.length() > 30 ? content.substring(0, 30) + "..." : content;
     }
 
     /**

@@ -2,6 +2,7 @@ package com.aiservice.aireviewassistant.controller;
 
 import com.aiservice.aireviewassistant.common.ApiResponse;
 import com.aiservice.aireviewassistant.dto.KnowledgeChunkDto;
+import com.aiservice.aireviewassistant.dto.KnowledgeDocumentDto;
 import com.aiservice.aireviewassistant.service.DocumentService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -59,6 +60,49 @@ public class KnowledgeBaseController {
         result.put("page", page);
         result.put("pageSize", pageSize);
         result.put("totalPages", (total + pageSize - 1) / pageSize);
+        return ApiResponse.success(result);
+    }
+
+    /**
+     * 查询课程下的资料列表（按上传文件聚合，每份资料含其全部分块）。
+     * <p>HTTP: {@code GET /api/knowledge-base/{courseId}/documents}</p>
+     * <p>知识库管理页默认展示资料列表，用户点击某份资料后再展开其分块。</p>
+     *
+     * @param courseId 课程 ID
+     * @return 包含资料列表与总分块数的映射
+     */
+    @Operation(summary = "查询课程下的资料列表（按资料聚合分块）")
+    @GetMapping("/{courseId}/documents")
+    public ApiResponse<Map<String, Object>> listDocuments(@PathVariable Integer courseId) {
+        List<KnowledgeDocumentDto> documents = documentService.listDocuments(courseId);
+        Map<String, Object> result = new HashMap<>();
+        result.put("documents", documents);
+        result.put("documentCount", documents.size());
+        result.put("totalChunks", documentService.countChunks(courseId));
+        return ApiResponse.success(result);
+    }
+
+    /**
+     * 查询某份资料的完整原文（用于“预览源文件”）。
+     * <p>HTTP: {@code GET /api/knowledge-base/{courseId}/document-content?name=xxx.md}</p>
+     * <p>优先返回上传时保存的原文；历史资料自动回退为分块拼接。</p>
+     *
+     * @param courseId 课程 ID
+     * @param name     资料名称（含扩展名）
+     * @return 包含资料名称与完整内容的映射；资料不存在返回 404
+     */
+    @Operation(summary = "查询资料完整原文")
+    @GetMapping("/{courseId}/document-content")
+    public ApiResponse<Map<String, Object>> documentContent(@PathVariable Integer courseId,
+                                                            @RequestParam("name") String name) {
+        String content = documentService.getDocumentContent(courseId, name);
+        if (content == null) {
+            return ApiResponse.error(404, "资料不存在或内容为空");
+        }
+        Map<String, Object> result = new HashMap<>();
+        result.put("name", name);
+        result.put("content", content);
+        result.put("length", content.length());
         return ApiResponse.success(result);
     }
 

@@ -29,16 +29,8 @@
             </span>
           </p>
 
-          <!-- 可点击预览区：结构化日程列表 + 悬停浮层特效 -->
-          <div
-            class="plan-preview"
-            role="button"
-            tabindex="0"
-            :aria-label="`查看 ${plan.courseName} 复习计划详情`"
-            @click="openPreview(plan)"
-            @keydown.enter.prevent="openPreview(plan)"
-            @keydown.space.prevent="openPreview(plan)"
-          >
+          <!-- 预览区：仅右上角放大镜按钮可打开详情，此处保留整卡点击作为便捷交互 -->
+          <div class="plan-preview" @click="openPreview(plan)">
             <ul v-if="plan.days && plan.days.length" class="plan-days">
               <li
                 v-for="d in plan.days.slice(0, DAY_PREVIEW_LIMIT)"
@@ -53,20 +45,6 @@
               </li>
             </ul>
             <p v-else class="plan-plain">{{ plainPreview(plan.content) }}</p>
-
-            <!-- 悬停遮罩与胶囊按钮：仅在支持 hover 的设备启用，触屏走点击路径 -->
-            <div class="preview-overlay" aria-hidden="true">
-              <span class="overlay-pill">
-                <el-icon><ZoomIn /></el-icon>
-                查看完整计划
-              </span>
-            </div>
-          </div>
-
-          <div class="plan-footer">
-            <el-button text size="small" @click="openPreview(plan)">
-              查看详情<el-icon class="footer-arrow"><ArrowRight /></el-icon>
-            </el-button>
           </div>
         </el-card>
       </el-col>
@@ -138,6 +116,9 @@
                       @change="(v: any) => toggleSection(day.day, sec.key, v)"
                     />
                     <span class="section-name">{{ sec.label }}</span>
+                    <el-tag v-if="sec.key === 'practice'" size="small" type="info" effect="plain" class="sec-tag">
+                      可累积错题
+                    </el-tag>
                     <span
                       v-if="generatingKey === sectionKey(day.day, sec.key)"
                       class="section-loading"
@@ -148,18 +129,83 @@
                     <el-button
                       v-else
                       size="small"
-                      :type="hasContent(day.day, sec.key) ? 'default' : 'primary'"
-                      plain
+                      class="gen-btn"
+                      :class="hasContent(day.day, sec.key) ? 'gen-btn--ghost' : 'gen-btn--solid'"
                       @click="generate(day.day, sec.key)"
                     >
+                      <el-icon class="gen-btn-icon"><MagicStick /></el-icon>
                       {{ hasContent(day.day, sec.key) ? '重新生成' : 'AI 生成' }}
                     </el-button>
                   </div>
+
                   <!-- 生成中的实时预览（原始 token 流） -->
                   <div v-if="generatingKey === sectionKey(day.day, sec.key)" class="section-streaming">
                     <pre>{{ streamingText }}<span class="stream-cursor">▊</span></pre>
                   </div>
-                  <!-- 已生成内容 -->
+
+                  <!-- 练习环节：交互式答题，提交后自动批改并将错题计入错题本 -->
+                  <div
+                    v-else-if="sec.key === 'practice' && hasContent(day.day, sec.key)"
+                    class="section-content practice-area"
+                  >
+                    <template v-if="practiceQuestionsOf(day.day).length">
+                      <div
+                        v-for="(q, qi) in practiceQuestionsOf(day.day)"
+                        :key="qi"
+                        class="practice-q"
+                      >
+                        <p class="pq-title">{{ qi + 1 }}. {{ q.question }}</p>
+                        <div class="pq-options">
+                          <button
+                            v-for="(opt, oi) in q.options"
+                            :key="oi"
+                            type="button"
+                            class="pq-option"
+                            :class="practiceOptionClass(day.day, qi, oi, q)"
+                            :disabled="!!practiceResults[day.day]"
+                            @click="selectPracticeAnswer(day.day, qi, optionLetter(oi))"
+                          >
+                            <span class="pq-letter">{{ optionLetter(oi) }}</span>
+                            <span class="pq-text">{{ opt }}</span>
+                          </button>
+                        </div>
+                        <div
+                          v-if="practiceResults[day.day]"
+                          class="pq-result"
+                          :class="practiceAnswerCorrect(day.day, qi) ? 'ok' : 'bad'"
+                        >
+                          <span v-if="practiceAnswerCorrect(day.day, qi)">✓ 回答正确</span>
+                          <span v-else>
+                            ✗ 回答错误 · 正确答案：<strong>{{ q.answer }}</strong>
+                          </span>
+                          <p v-if="q.explanation" class="pq-explanation">解析：{{ q.explanation }}</p>
+                        </div>
+                      </div>
+
+                      <div class="practice-actions">
+                        <template v-if="!practiceResults[day.day]">
+                          <el-button
+                            type="success"
+                            size="small"
+                            :loading="practiceGrading === day.day"
+                            @click="submitPractice(day.day)"
+                          >
+                            提交批改
+                          </el-button>
+                          <span class="practice-hint">答错的题会自动加入错题本</span>
+                        </template>
+                        <template v-else>
+                          <span class="practice-score">
+                            得分 {{ practiceResults[day.day]!.correctCount }}/{{ practiceResults[day.day]!.total }}
+                          </span>
+                          <el-button size="small" plain @click="retryPractice(day.day)">再做一次</el-button>
+                        </template>
+                      </div>
+                    </template>
+                    <MarkdownRenderer v-else :content="sectionContent(day.day, sec.key)" />
+                  </div>
+
+                  <!-- 其他环节：生成内容直接渲染 Markdown -->
                   <div v-else-if="hasContent(day.day, sec.key)" class="section-content">
                     <MarkdownRenderer :content="sectionContent(day.day, sec.key)" />
                   </div>
@@ -208,10 +254,13 @@ import AppLayout from '@/components/AppLayout.vue'
 import MarkdownRenderer from '@/components/MarkdownRenderer.vue'
 import * as courseApi from '@/api/course'
 import * as planApi from '@/api/plan'
+import * as quizApi from '@/api/quiz'
 import { PLAN_SECTIONS } from '@/api/plan'
 import type { Course } from '@/api/course'
+import type { QuizQuestion, QuizResult } from '@/api/quiz'
 import type { PlanDayState, PlanProgress, PlanSectionKey, StudyPlan } from '@/api/plan'
-import { Calendar, Delete, ZoomIn, Loading, ArrowRight } from '@element-plus/icons-vue'
+import { parseQuestions, optionLetter } from '@/utils/quiz'
+import { Calendar, Delete, ZoomIn, Loading, MagicStick } from '@element-plus/icons-vue'
 
 /** 卡片预览区展示的日程条数上限，超出显示“还有 N 天” */
 const DAY_PREVIEW_LIMIT = 5
@@ -237,8 +286,28 @@ const streamingText = ref('')
 let dayEventSource: EventSource | null = null
 let saveTimer: ReturnType<typeof setTimeout> | null = null
 
+// ---------- 练习（交互式答题）状态 ----------
+/** 各天各题的作答：day -> questionIndex -> 选项字母 */
+const practiceAnswers = ref<Record<number, Record<number, string>>>({})
+/** 各天的批改结果；不存在表示未提交 */
+const practiceResults = ref<Record<number, QuizResult>>({})
+/** 正在批改的天；null 表示空闲 */
+const practiceGrading = ref<number | null>(null)
+
 /** 后端解析出的每日结构 */
 const planDays = computed(() => previewPlan.value?.days ?? [])
+
+/** 各天练习题目（从已生成的练习内容解析；内容为空则无该天条目） */
+const practiceQuestionsMap = computed<Record<number, QuizQuestion[]>>(() => {
+  const map: Record<number, QuizQuestion[]> = {}
+  for (const day of planDays.value) {
+    const content = sectionContent(day.day, 'practice')
+    if (content) {
+      map[day.day] = parseQuestions(content)
+    }
+  }
+  return map
+})
 
 /** 已完成天数 */
 const completedDays = computed(() => planDays.value.filter(d => isDayDone(d.day)).length)
@@ -314,6 +383,10 @@ async function handleGenerate() {
 function openPreview(plan: StudyPlan) {
   previewPlan.value = plan
   dayStates.value = parseProgress(plan.progress)
+  // 每次打开都重置练习作答，避免残留上一次次的状态
+  practiceAnswers.value = {}
+  practiceResults.value = {}
+  practiceGrading.value = null
   showRaw.value = false
   previewVisible.value = true
 }
@@ -321,6 +394,10 @@ function openPreview(plan: StudyPlan) {
 /** 关闭预览时清理流与待保存进度 */
 function onPreviewClosed() {
   closeStream()
+  // 清理练习交互状态，避免下次打开残留上一次的作答
+  practiceAnswers.value = {}
+  practiceResults.value = {}
+  practiceGrading.value = null
   // 立即落盘未保存的勾选，避免防抖窗口内关闭导致丢失
   if (saveTimer) {
     clearTimeout(saveTimer)
@@ -494,6 +571,11 @@ function generate(day: number, section: PlanSectionKey) {
     // 完成控制帧：服务端已保存生成内容，主动关闭连接并刷新
     if (event.data.startsWith('{"__done"')) {
       closeStream()
+      // 重新生成练习时清空该天旧作答，避免旧答案与新题目错位
+      if (section === 'practice') {
+        delete practiceAnswers.value[day]
+        delete practiceResults.value[day]
+      }
       await reloadPlan()
       return
     }
@@ -575,6 +657,84 @@ function formatTime(d?: string) {
   if (!d) return ''
   const t = new Date(d)
   return `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`
+}
+
+// ---------- 练习环节：交互式答题（与测验页一致，错题自动入库） ----------
+
+/** 取某天的练习题目（无内容或解析失败时返回空数组，此时回退为 Markdown 展示） */
+function practiceQuestionsOf(day: number): QuizQuestion[] {
+  return practiceQuestionsMap.value[day] ?? []
+}
+
+/** 选择某道题的答案 */
+function selectPracticeAnswer(day: number, questionIndex: number, letter: string) {
+  // 已提交后不允许改选，避免界面与服务端记录不一致
+  if (practiceResults.value[day]) return
+  if (!practiceAnswers.value[day]) practiceAnswers.value[day] = {}
+  practiceAnswers.value[day][questionIndex] = letter
+}
+
+/** 选项样式：提交后标出正确与选错的选项，提交前标出选中项 */
+function practiceOptionClass(day: number, questionIndex: number, optionIndex: number, q: QuizQuestion) {
+  const letter = optionLetter(optionIndex)
+  const result = practiceResults.value[day]
+  if (result) {
+    const detail = result.details[questionIndex]
+    if (letter === (detail?.correctAnswer || q.answer)) return 'is-correct'
+    if (letter === detail?.userAnswer) return 'is-wrong'
+    return 'is-dim'
+  }
+  return practiceAnswers.value[day]?.[questionIndex] === letter ? 'is-selected' : ''
+}
+
+/** 某道题是否答对（仅提交后有效） */
+function practiceAnswerCorrect(day: number, questionIndex: number) {
+  return !!practiceResults.value[day]?.details[questionIndex]?.correct
+}
+
+/** 提交某天的练习并自动批改；答错的题由后端自动写入错题本 */
+async function submitPractice(day: number) {
+  const plan = previewPlan.value
+  if (!plan) return
+  const questions = practiceQuestionsOf(day)
+  if (questions.length === 0) return
+  const answers = practiceAnswers.value[day] ?? {}
+  if (questions.some((_, i) => !answers[i])) {
+    ElMessage.warning('请回答所有题目后再提交')
+    return
+  }
+  const courseId = courses.value.find(c => c.name === plan.courseName)?.id
+  if (!courseId) {
+    // 课程已删除或改名：缺少课程 ID 无法关联错题本，提前告知用户
+    ElMessage.warning('未找到该计划对应的课程，无法提交批改（错题需关联课程）')
+    return
+  }
+  practiceGrading.value = day
+  try {
+    const result = await quizApi.gradeQuiz(
+      courseId,
+      plan.courseName,
+      questions,
+      questions.map((_, i) => answers[i])
+    )
+    practiceResults.value[day] = result
+    const wrong = result.total - result.correctCount
+    if (wrong > 0) {
+      ElMessage.success(`已批改：答对 ${result.correctCount}/${result.total}，${wrong} 道错题已加入错题本`)
+    } else {
+      ElMessage.success(`全部答对！${result.correctCount}/${result.total}`)
+    }
+  } catch (e) {
+    console.error(e)
+  } finally {
+    practiceGrading.value = null
+  }
+}
+
+/** 再做一次：清空该天的作答与结果（题目与错题本记录保持不变） */
+function retryPractice(day: number) {
+  delete practiceAnswers.value[day]
+  delete practiceResults.value[day]
 }
 </script>
 
@@ -744,64 +904,14 @@ function formatTime(d?: string) {
   line-height: 1.7;
   color: var(--color-muted-foreground);
 }
-/* ---------- 悬停浮层：渐变遮罩 + 胶囊按钮上浮 ---------- */
-.preview-overlay {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: linear-gradient(180deg, rgba(124, 58, 237, 0.03) 0%, rgba(124, 58, 237, 0.16) 100%);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity var(--t-normal) var(--ease);
-}
-.overlay-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 16px;
-  border-radius: 999px;
-  font-size: 13px;
-  font-weight: 600;
-  color: #fff;
-  background: var(--gradient-primary);
-  box-shadow: var(--shadow-primary);
-  opacity: 0;
-  transform: translateY(10px) scale(0.94);
-  transition: transform var(--t-normal) var(--ease-spring), opacity var(--t-normal) var(--ease);
-}
-/* 仅在支持 hover 的设备启用悬浮特效（触屏走点击路径，避免状态“粘滞”） */
+/* 悬停时日程徽标轻微放大：仅对精细指针设备生效 */
 @media (hover: hover) and (pointer: fine) {
   .plan-preview:hover {
     background: var(--color-primary-50);
   }
-  .plan-preview:hover .preview-overlay {
-    opacity: 1;
-  }
-  .plan-preview:hover .overlay-pill {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
   .plan-preview:hover .d-badge {
     transform: scale(1.1);
   }
-}
-.plan-footer {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 10px;
-}
-.plan-footer :deep(.el-button) {
-  font-size: 13px;
-}
-.footer-arrow {
-  margin-left: 2px;
-  transition: transform var(--t-fast) var(--ease);
-}
-.plan-footer :deep(.el-button:hover) .footer-arrow {
-  transform: translateX(3px);
 }
 /* 降低动效偏好：关闭位移与缩放，仅保留颜色反馈 */
 @media (prefers-reduced-motion: reduce) {
@@ -810,9 +920,7 @@ function formatTime(d?: string) {
   .plan-preview:active,
   .zoom-btn :deep(.el-icon),
   .plan-card:hover .zoom-btn :deep(.el-icon),
-  .overlay-pill,
-  .d-badge,
-  .footer-arrow {
+  .d-badge {
     transform: none;
     transition: none;
   }
@@ -937,6 +1045,59 @@ function formatTime(d?: string) {
   color: var(--color-foreground);
   flex: 1;
 }
+/* ---------- AI 生成按钮：高对比度，彻底解决“看不清字” ---------- */
+.gen-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1.5px solid transparent;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  cursor: pointer;
+  transition: transform var(--t-fast) var(--ease-spring), box-shadow var(--t-fast) var(--ease),
+    background var(--t-fast) var(--ease), color var(--t-fast) var(--ease);
+}
+/* 未生成：品牌渐变实心按钮，白字 + 紫影，视觉焦点明确 */
+.gen-btn--solid {
+  color: #fff;
+  background: var(--gradient-primary);
+  box-shadow: var(--shadow-primary);
+}
+.gen-btn--solid:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-primary-lg);
+}
+.gen-btn--solid:active {
+  transform: translateY(0) scale(0.97);
+}
+/* 已生成：浅底描边按钮，与实心按钮形成清晰的层次区分 */
+.gen-btn--ghost {
+  color: var(--color-primary-dark);
+  background: var(--color-card);
+  border-color: var(--color-primary-200);
+}
+.gen-btn--ghost:hover {
+  background: var(--color-primary-50);
+  border-color: var(--color-primary);
+}
+.gen-btn--ghost:active {
+  transform: scale(0.97);
+}
+.gen-btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+.gen-btn-icon {
+  font-size: 14px;
+}
+.sec-tag {
+  flex-shrink: 0;
+}
 .section-loading {
   display: inline-flex;
   align-items: center;
@@ -980,5 +1141,127 @@ function formatTime(d?: string) {
   line-height: 1.7;
   max-height: 320px;
   overflow-y: auto;
+}
+
+/* ---------- 练习环节：交互式答题 ---------- */
+.practice-area {
+  max-height: 460px;
+}
+.practice-q {
+  padding: 10px 0;
+}
+.practice-q + .practice-q {
+  border-top: 1px dashed var(--color-border);
+}
+.pq-title {
+  margin: 0 0 10px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--color-foreground);
+  line-height: 1.6;
+}
+.pq-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* 选项按钮：可点击卡片，悬停右移，选中/判题后有明确色彩反馈 */
+.pq-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-card);
+  color: var(--color-foreground);
+  font-size: 13px;
+  line-height: 1.6;
+  text-align: left;
+  cursor: pointer;
+  transition: all var(--t-fast) var(--ease);
+}
+.pq-option:hover:not(:disabled) {
+  border-color: var(--color-primary-light);
+  background: var(--color-primary-50);
+  transform: translateX(2px);
+}
+.pq-option:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+.pq-option:disabled {
+  cursor: default;
+}
+.pq-option.is-selected {
+  border-color: var(--color-primary);
+  background: var(--color-primary-50);
+  box-shadow: 0 0 0 3px var(--color-primary-100);
+}
+.pq-option.is-correct {
+  border-color: var(--color-success);
+  background: var(--color-success-light);
+}
+.pq-option.is-wrong {
+  border-color: var(--color-danger);
+  background: var(--color-danger-light);
+}
+.pq-option.is-dim {
+  opacity: 0.55;
+}
+.pq-letter {
+  flex-shrink: 0;
+  font-weight: 700;
+  color: var(--color-primary-dark);
+}
+.pq-option.is-correct .pq-letter {
+  color: var(--color-success);
+}
+.pq-option.is-wrong .pq-letter {
+  color: var(--color-danger);
+}
+.pq-text {
+  flex: 1;
+  min-width: 0;
+}
+.pq-result {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border-left: 3px solid transparent;
+  font-size: 12.5px;
+}
+.pq-result.ok {
+  background: var(--color-success-light);
+  border-left-color: var(--color-success);
+  color: var(--color-success);
+}
+.pq-result.bad {
+  background: var(--color-danger-light);
+  border-left-color: var(--color-danger);
+  color: var(--color-foreground);
+}
+.pq-explanation {
+  margin: 6px 0 0;
+  color: var(--color-muted-foreground);
+  line-height: 1.7;
+}
+.practice-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border);
+}
+.practice-hint {
+  font-size: 12px;
+  color: var(--color-muted-foreground);
+}
+.practice-score {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-primary-dark);
 }
 </style>

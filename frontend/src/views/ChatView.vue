@@ -38,115 +38,166 @@
           </el-tag>
         </div>
 
-        <div ref="chatBoxRef" class="chat-box" @scroll="handleScroll">
+        <div
+          ref="chatBoxRef"
+          class="chat-box"
+          :class="{ 'is-empty': messages.length === 0 && !streamingMsg }"
+          @scroll="handleScroll"
+        >
           <div v-if="messages.length === 0" class="welcome-msg">
+            <div class="welcome-icon">
+              <el-icon :size="26"><ChatDotRound /></el-icon>
+            </div>
             <h3>有什么可以帮你的？</h3>
             <p>我可以回答问题、生成测验或制定学习计划</p>
             <div class="quick-actions">
-              <el-button round @click="quickAsk('请帮我出3道关于___知识点的选择题')">
-                生成测验
-              </el-button>
-              <el-button round @click="quickAsk('请帮我制定一个___学科的7天复习计划')">
-                学习计划
-              </el-button>
+              <button class="quick-card" type="button" @click="quickAsk('请帮我出3道关于___知识点的选择题')">
+                <el-icon class="qc-icon"><EditPen /></el-icon>
+                <span class="qc-title">生成测验</span>
+                <span class="qc-desc">按知识点出选择题并批改</span>
+              </button>
+              <button class="quick-card" type="button" @click="quickAsk('请帮我制定一个___学科的7天复习计划')">
+                <el-icon class="qc-icon"><Calendar /></el-icon>
+                <span class="qc-title">学习计划</span>
+                <span class="qc-desc">分天安排复习任务</span>
+              </button>
             </div>
           </div>
           <div v-if="errorMsg" class="error-alert">
             <el-alert :title="errorMsg" type="error" closable @close="errorMsg = ''" />
           </div>
 
+          <!-- 消息列表：用户消息右对齐气泡，AI 消息左对齐纯文本（DeepSeek 风格） -->
           <div
             v-for="(msg, index) in messages"
             :key="msg.id ?? index"
-            :class="['msg', msg.role]"
+            :class="['msg-row', msg.role, { 'is-editing': editingIndex === index }]"
           >
-            <!-- RAG 检索执行情况（仅 AI 消息；历史消息通过检索日志回填） -->
-            <div v-if="msg.role !== 'user' && msg.ragMeta" class="rag-badge">
-              <el-tooltip placement="top" effect="light">
-                <template #content>
-                  <div class="rag-tip">
-                    <p><strong>知识库检索详情</strong></p>
-                    <p>命中片段：{{ msg.ragMeta.resultCount }} / TopK {{ msg.ragMeta.topK }}</p>
-                    <p v-if="msg.ragMeta.candidateCount != null">向量初始召回：{{ msg.ragMeta.candidateCount }} 篇</p>
-                    <p v-if="msg.ragMeta.topScore != null">最高相似度：{{ Number(msg.ragMeta.topScore).toFixed(3) }}</p>
-                    <p v-if="msg.ragMeta.threshold != null">相似度阈值：{{ msg.ragMeta.threshold }}</p>
-                    <p v-if="msg.ragMeta.latencyMs != null">检索耗时：{{ msg.ragMeta.latencyMs }} ms</p>
-                    <p v-if="msg.ragMeta.keywordFallback">已触发关键词兜底召回</p>
+            <div class="msg-main">
+              <!-- 用户消息：可选气泡 + 编辑态 -->
+              <template v-if="msg.role === 'user'">
+                <div v-if="editingIndex === index" class="edit-box" @keydown="onEditKeydown">
+                  <el-input
+                    v-model="editingText"
+                    type="textarea"
+                    :autosize="{ minRows: 3, maxRows: 10 }"
+                    resize="none"
+                    autofocus
+                  />
+                  <div class="edit-actions">
+                    <span class="edit-hint">
+                      <kbd>Esc</kbd> 取消
+                      <span class="sep">·</span>
+                      <kbd>⌘/Ctrl</kbd><span class="plus">+</span><kbd>Enter</kbd> 保存
+                    </span>
+                    <div class="edit-btns">
+                      <button class="edit-btn ghost" type="button" @click="cancelEdit">取消</button>
+                      <button class="edit-btn primary" type="button" @click="submitEdit">
+                        保存并发送
+                      </button>
+                    </div>
                   </div>
+                </div>
+                <div v-else class="bubble user-bubble">{{ msg.content }}</div>
+              </template>
+
+              <!-- AI 消息：无气泡，直接铺排内容 -->
+              <template v-else>
+                <!-- RAG 检索执行情况（历史消息通过检索日志回填）；就地重生成时隐藏旧标记 -->
+                <div
+                  v-if="msg.ragMeta && !(streamingTargetId === msg.id && isStreaming)"
+                  :class="['rag-badge', { muted: !hasRagHit(msg) }]"
+                >
+                  <el-tooltip placement="top" effect="light">
+                    <template #content>
+                      <div class="rag-tip">
+                        <p><strong>知识库检索详情</strong></p>
+                        <p v-if="hasRagHit(msg)">
+                          命中片段：{{ msg.ragMeta.resultCount }} / TopK {{ msg.ragMeta.topK }}
+                        </p>
+                        <p v-else-if="msg.ragMeta.resultCount > 0">
+                          召回了 {{ msg.ragMeta.resultCount }} 个片段，但模型判定与问题不相关，未用于作答
+                        </p>
+                        <p v-else>未检索到知识库内容</p>
+                        <p v-if="msg.ragMeta.candidateCount != null">向量初始召回：{{ msg.ragMeta.candidateCount }} 篇</p>
+                        <p v-if="msg.ragMeta.topScore != null">最高相似度：{{ Number(msg.ragMeta.topScore).toFixed(3) }}</p>
+                        <p v-if="msg.ragMeta.threshold != null">相似度阈值：{{ msg.ragMeta.threshold }}</p>
+                        <p v-if="msg.ragMeta.latencyMs != null">检索耗时：{{ msg.ragMeta.latencyMs }} ms</p>
+                        <p v-if="msg.ragMeta.keywordFallback">已触发关键词兜底召回</p>
+                      </div>
+                    </template>
+                    <span class="rag-content">
+                      <el-icon><Search /></el-icon>
+                      <template v-if="hasRagHit(msg)">
+                        知识库命中 {{ msg.ragMeta.resultCount }}/{{ msg.ragMeta.topK }}
+                      </template>
+                      <template v-else-if="msg.ragMeta.resultCount > 0">知识库无相关内容</template>
+                      <template v-else>知识库未命中</template>
+                      <span v-if="msg.ragMeta.topScore != null && hasRagHit(msg)" class="rag-sep">
+                        · 相似度 {{ Number(msg.ragMeta.topScore).toFixed(2) }}
+                      </span>
+                      <span v-if="msg.ragMeta.latencyMs != null" class="rag-sep">
+                        · {{ msg.ragMeta.latencyMs }}ms
+                      </span>
+                    </span>
+                  </el-tooltip>
+                </div>
+                <!-- 就地重生成中：直接在该消息位置展示流式内容，不跳到列表底部 -->
+                <template v-if="streamingTargetId === msg.id && isStreaming">
+                  <MarkdownRenderer :content="streamingMsg" :streaming="true" />
+                  <span class="cursor">▊</span>
                 </template>
-                <span class="rag-content">
-                  <el-icon><Search /></el-icon>
-                  <template v-if="msg.ragMeta.resultCount > 0">
-                    知识库命中 {{ msg.ragMeta.resultCount }}/{{ msg.ragMeta.topK }}
-                  </template>
-                  <template v-else>知识库未命中</template>
-                  <span v-if="msg.ragMeta.topScore != null" class="rag-sep">
-                    · 相似度 {{ Number(msg.ragMeta.topScore).toFixed(2) }}
-                  </span>
-                  <span v-if="msg.ragMeta.latencyMs != null" class="rag-sep">
-                    · {{ msg.ragMeta.latencyMs }}ms
-                  </span>
-                </span>
-              </el-tooltip>
+                <MarkdownRenderer v-else :content="msg.content" :streaming="false" />
+              </template>
             </div>
 
-            <!-- 编辑用户消息（DeepSeek 风格） -->
-            <div v-if="editingIndex === index" class="edit-box">
-              <el-input v-model="editingText" type="textarea" :rows="3" resize="none" />
-              <div class="edit-actions">
-                <el-button size="small" @click="cancelEdit">取消</el-button>
-                <el-button size="small" type="primary" @click="submitEdit">保存并发送</el-button>
-              </div>
+            <!-- 操作栏：位于气泡/内容下方（不在气泡内部），图标 + 文字，常态可见 -->
+            <div v-if="editingIndex !== index" class="msg-actions">
+              <button class="act-btn" type="button" @click="copyText(msg.content)">
+                <el-icon><CopyDocument /></el-icon><span>复制</span>
+              </button>
+              <button
+                v-if="msg.role === 'user'"
+                class="act-btn"
+                type="button"
+                :disabled="isStreaming"
+                @click="startEdit(index)"
+              >
+                <el-icon><EditPen /></el-icon><span>编辑</span>
+              </button>
+              <button
+                v-else
+                class="act-btn"
+                type="button"
+                :disabled="isStreaming || !canRegenerate(index)"
+                @click="regenerate(index)"
+              >
+                <el-icon><RefreshRight /></el-icon><span>重新生成</span>
+              </button>
             </div>
-            <template v-else>
-              <MarkdownRenderer :content="msg.content" :streaming="false" />
-              <!-- 消息操作条：始终可见（兼容触屏），悬停高亮 -->
-              <div class="msg-actions">
-                <button class="act-btn" type="button" title="复制" @click="copyText(msg.content)">
-                  <el-icon><CopyDocument /></el-icon>
-                </button>
-                <button
-                  v-if="msg.role === 'user'"
-                  class="act-btn"
-                  type="button"
-                  title="编辑并重新发送"
-                  :disabled="isStreaming"
-                  @click="startEdit(index)"
-                >
-                  <el-icon><EditPen /></el-icon>
-                </button>
-                <button
-                  v-else
-                  class="act-btn"
-                  type="button"
-                  title="重新生成"
-                  :disabled="isStreaming || !canRegenerate(index)"
-                  @click="regenerate(index)"
-                >
-                  <el-icon><RefreshRight /></el-icon>
-                </button>
-              </div>
-            </template>
           </div>
 
-          <div v-if="streamingMsg" class="msg ai typing">
-            <div v-if="streamRagMeta" class="rag-badge">
-              <span class="rag-content">
-                <el-icon><Search /></el-icon>
-                <template v-if="streamRagMeta.resultCount > 0">
-                  知识库命中 {{ streamRagMeta.resultCount }}/{{ streamRagMeta.topK }}
-                </template>
-                <template v-else>知识库未命中</template>
-                <span v-if="streamRagMeta.topScore != null" class="rag-sep">
-                  · 相似度 {{ Number(streamRagMeta.topScore).toFixed(2) }}
+          <!-- 流式输出中的 AI 回复（就地重生成时改为渲染在原消息位置，故此处不再重复展示） -->
+          <div v-if="streamingMsg && streamingTargetId === null" class="msg-row assistant">
+            <div class="msg-main">
+              <div v-if="streamRagMeta" class="rag-badge">
+                <span class="rag-content">
+                  <el-icon><Search /></el-icon>
+                  <template v-if="streamRagMeta.resultCount > 0">
+                    知识库命中 {{ streamRagMeta.resultCount }}/{{ streamRagMeta.topK }}
+                  </template>
+                  <template v-else>知识库未命中</template>
+                  <span v-if="streamRagMeta.topScore != null" class="rag-sep">
+                    · 相似度 {{ Number(streamRagMeta.topScore).toFixed(2) }}
+                  </span>
+                  <span v-if="streamRagMeta.latencyMs != null" class="rag-sep">
+                    · {{ streamRagMeta.latencyMs }}ms
+                  </span>
                 </span>
-                <span v-if="streamRagMeta.latencyMs != null" class="rag-sep">
-                  · {{ streamRagMeta.latencyMs }}ms
-                </span>
-              </span>
+              </div>
+              <MarkdownRenderer :content="streamingMsg" :streaming="true" />
+              <span class="cursor">▊</span>
             </div>
-            <MarkdownRenderer :content="streamingMsg" :streaming="true" />
-            <span class="cursor">▊</span>
           </div>
         </div>
 
@@ -203,7 +254,7 @@ import * as conversationApi from '@/api/conversation'
 import * as ragApi from '@/api/rag'
 import { buildStreamUrl } from '@/api/agent'
 import type { Conversation, Message, RagMetaInfo } from '@/api/conversation'
-import { Plus, Close, ArrowDown, CopyDocument, EditPen, RefreshRight, Search } from '@element-plus/icons-vue'
+import { Plus, Close, ArrowDown, CopyDocument, EditPen, RefreshRight, Search, ChatDotRound, Calendar } from '@element-plus/icons-vue'
 
 const authStore = useAuthStore()
 const chatStore = useChatStore()
@@ -227,6 +278,13 @@ const streamRagMeta = ref<RagMetaInfo | null>(null)
 /** 正在编辑的用户消息下标；null 表示无编辑 */
 const editingIndex = ref<number | null>(null)
 const editingText = ref('')
+
+/**
+ * 正在“就地重新生成”的 AI 消息 ID。
+ * <p>不为 null 时，流式内容直接渲染在该条消息的位置（编辑提问 / 重新生成场景），
+ * 而不是追加到底部；且不会有任何历史消息被删除。</p>
+ */
+const streamingTargetId = ref<number | null>(null)
 
 /**
  * 是否自动跟随最新消息。
@@ -292,6 +350,8 @@ async function createNewChat() {
     ElMessage.info('当前已经是新对话')
     return
   }
+  // 中止进行中的流：否则旧的流式内容会继续拼接到新会话界面上
+  abortStream()
   try {
     const conv = await conversationApi.createConversation('新对话')
     // 新会话插入列表顶部并立即选中
@@ -299,7 +359,6 @@ async function createNewChat() {
     currentConversationId.value = conv.id
     currentTitle.value = conv.title || '新对话'
     messages.value = []
-    streamingMsg.value = ''
     autoFollow.value = true
     localStorage.setItem('currentConversationId', String(conv.id))
     sidebarVisible.value = false
@@ -309,7 +368,25 @@ async function createNewChat() {
   }
 }
 
+/**
+ * 中止进行中的流式请求（不保留已生成的部分内容）。
+ * <p>切换会话、新建对话时调用：避免旧流的 token 继续拼接到新会话界面；
+ * 服务端已收到的内容仍会按原 conversationId 保存，不会丢失。</p>
+ */
+function abortStream() {
+  if (eventSource) {
+    eventSource.close()
+    eventSource = null
+  }
+  streamingMsg.value = ''
+  streamRagMeta.value = null
+  streamingTargetId.value = null
+  isStreaming.value = false
+}
+
 async function switchConversation(conv: Conversation) {
+  // 中止进行中的流：避免旧会话的流式内容串到新会话界面上
+  abortStream()
   currentConversationId.value = conv.id
   currentTitle.value = conv.title || '对话'
   // 切换会话时重置跟随状态，并按新会话内容跳到最新
@@ -385,10 +462,13 @@ function sendMessage(explicitText?: string) {
 /**
  * 发起 SSE 流式对话。
  *
- * @param text             用户消息文本
- * @param reuseUserMessage 为 true 时视为“重新生成”：服务端不重复保存用户消息
+ * @param text               用户消息文本
+ * @param reuseUserMessage   为 true 时视为“编辑/重新生成”：服务端不重复保存用户消息
+ * @param assistantMessageId 需要就地覆盖的 AI 消息 ID：新回复写入原消息行，
+ *                           不删除任何历史记录、不改变消息顺序
+ * @param historyBeforeId    上下文截断点：只取该消息之前的历史作为上下文
  */
-function startStream(text: string, reuseUserMessage: boolean) {
+function startStream(text: string, reuseUserMessage: boolean, assistantMessageId?: number, historyBeforeId?: number) {
   if (isStreaming.value) return
   const fullMsg = chatStore.currentCourse && !text.includes(chatStore.currentCourse.name)
     ? `[课程: ${chatStore.currentCourse.name}] ${text}`
@@ -397,10 +477,18 @@ function startStream(text: string, reuseUserMessage: boolean) {
   isStreaming.value = true
   streamingMsg.value = ''
   streamRagMeta.value = null
+  streamingTargetId.value = assistantMessageId ?? null
   // 主动发送时强制回到最新，确保用户能看到自己的提问
   scrollToBottom(true)
 
-  const url = buildStreamUrl(fullMsg, currentConversationId.value || undefined, reuseUserMessage)
+  const url = buildStreamUrl(
+    fullMsg,
+    currentConversationId.value || undefined,
+    reuseUserMessage,
+    chatStore.currentCourse?.id,
+    assistantMessageId,
+    historyBeforeId
+  )
   eventSource = new EventSource(url)
 
   eventSource.onmessage = (event) => {
@@ -488,6 +576,7 @@ function finishStream(syncWithServer: boolean) {
   }
   streamingMsg.value = ''
   streamRagMeta.value = null
+  streamingTargetId.value = null
   isStreaming.value = false
   loadConversations()
   if (syncWithServer) {
@@ -556,6 +645,33 @@ function queryMatches(userContent: string, logQuery: string) {
   return userContent === logQuery || userContent.includes(logQuery) || logQuery.includes(userContent)
 }
 
+/**
+ * 模型在“知识库无相关内容”时的固定回复（定义于 prompts/rag-system.txt 与 explain-system.txt）。
+ * 用于反查徽标状态，避免出现“回答提示无相关内容、徽标却显示命中”的自相矛盾。
+ */
+const NO_CONTENT_MARKERS = ['暂无相关内容', '暂无相关课程资料']
+
+/**
+ * 判断这条 AI 回复是否表示“知识库未命中”。
+ * <p>仅在回复足够短时判定——无相关内容的回复本身就是一句短提示，
+ * 这样可避免长答案中引述该句话时被误判。</p>
+ */
+function isNoContentAnswer(content?: string) {
+  if (!content) return false
+  const text = content.replace(/\s+/g, '')
+  if (text.length > 100) return false
+  return NO_CONTENT_MARKERS.some(m => text.includes(m))
+}
+
+/**
+ * 徽标是否应显示为“命中”：既要有召回结果，回答也不能是“无相关内容”。
+ * <p>检索分数只能证明“召回到了东西”，是否真的相关由模型在作答时判定；
+ * 两者不一致时以回答为准，否则会出现“徽标说命中、正文说没有”的矛盾。</p>
+ */
+function hasRagHit(msg: Message) {
+  return !!msg.ragMeta && msg.ragMeta.resultCount > 0 && !isNoContentAnswer(msg.content)
+}
+
 // ---------- 消息操作：复制 / 编辑 / 重新生成 ----------
 
 /** 复制文本到剪贴板（含非安全上下文兜底） */
@@ -580,13 +696,24 @@ async function copyText(text: string) {
   }
 }
 
+/** 课程前缀（选中课程时自动拼接），编辑态需剥离展示、保存时恢复 */
+const COURSE_PREFIX_RE = /^\[课程[:：][^\]]*\]\s*/
+
 /** 进入编辑态：把用户消息替换为可编辑文本框 */
 function startEdit(index: number) {
   if (isStreaming.value) return
   const msg = messages.value[index]
   if (!msg || msg.role !== 'user') return
   editingIndex.value = index
-  editingText.value = msg.content
+  // 编辑框内不展示 [课程: xxx] 前缀，避免干扰用户修改正文
+  editingText.value = msg.content.replace(COURSE_PREFIX_RE, '')
+  // 聚焦并把光标移到末尾（autofocus 在反复进出编辑态时不稳定，这里显式处理）
+  nextTick(() => {
+    const ta = document.querySelector<HTMLTextAreaElement>('.edit-box .el-textarea__inner')
+    if (!ta) return
+    ta.focus()
+    ta.setSelectionRange(ta.value.length, ta.value.length)
+  })
 }
 
 function cancelEdit() {
@@ -594,7 +721,24 @@ function cancelEdit() {
   editingText.value = ''
 }
 
-/** 保存编辑：截断该消息及其之后的消息，再以新内容重新发送 */
+/**
+ * 恢复消息的课程前缀：优先沿用原消息的前缀，否则使用当前选中课程。
+ * 与服务端约定保持一致（数据库存的是带前缀的完整文本）。
+ */
+function applyCoursePrefix(text: string, original: string) {
+  const matched = (original || '').match(COURSE_PREFIX_RE)
+  if (matched) return matched[0] + text
+  const course = chatStore.currentCourse
+  if (course && !text.includes(course.name)) return `[课程: ${course.name}] ${text}`
+  return text
+}
+
+/**
+ * 保存编辑：就地更新该条消息内容，并仅重生成它对应的 AI 回复。
+ * <p><b>不会删除任何历史记录</b>：
+ * 之前的提问与回复原样保留；该条提问后面的对话也全部保留；
+ * 只有紧跟在它后面的那条 AI 回复会被就地覆盖为新内容（因为旧答案已不匹配新问题）。</p>
+ */
 async function submitEdit() {
   const index = editingIndex.value
   if (index == null) return
@@ -604,18 +748,37 @@ async function submitEdit() {
     return
   }
   const target = messages.value[index]
+  const reply = messages.value[index + 1]
+  const targetId = target && isPersistedId(target.id) ? target.id : undefined
+  const replyId = reply && reply.role === 'assistant' && isPersistedId(reply.id) ? reply.id : undefined
+  const fullText = applyCoursePrefix(text, target?.content || '')
   editingIndex.value = null
   try {
-    if (target && isPersistedId(target.id)) {
-      await conversationApi.truncateMessages(target.id)
+    if (targetId) {
+      // 就地更新原消息内容（不删除、不新增）
+      await conversationApi.updateMessage(targetId, fullText)
     }
   } catch (e) {
     console.error(e)
-    ElMessage.error('操作失败，请重试')
+    ElMessage.error('保存失败，请重试')
     return
   }
-  messages.value.splice(index)
-  sendMessage(text)
+  // 本地同步展示内容；其余消息（编辑点之前与之后）全部保留不动
+  if (target) target.content = fullText
+  // 重新生成：回复就地覆盖到原消息行，上下文只取编辑点之前的历史
+  const messagePersisted = !!targetId
+  startStream(fullText, messagePersisted, replyId, targetId)
+}
+
+/** 编辑态键盘操作：Esc 取消编辑，⌘/Ctrl + Enter 保存并发送 */
+function onEditKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    cancelEdit()
+  } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    e.preventDefault()
+    submitEdit()
+  }
 }
 
 /** 是否可以重新生成：该 AI 消息前面存在一条用户消息 */
@@ -624,24 +787,19 @@ function canRegenerate(index: number): boolean {
   return !!prev && prev.role === 'user'
 }
 
-/** 重新生成：截断该 AI 回复及其后续消息，复用上一条用户消息重新生成（不重复插入提问） */
+/**
+ * 重新生成：不删除任何历史记录，仅把新的 AI 回复就地覆盖到原消息行。
+ * <p>上下文只取该提问之前的历史，使重生成结果与“重生成点之后的旧对话”无关。</p>
+ */
 async function regenerate(index: number) {
   if (isStreaming.value) return
   const assistant = messages.value[index]
   const prevUser = messages.value[index - 1]
   if (!assistant || assistant.role !== 'assistant' || !prevUser || prevUser.role !== 'user') return
-  try {
-    if (isPersistedId(assistant.id)) {
-      await conversationApi.truncateMessages(assistant.id)
-    }
-  } catch (e) {
-    console.error(e)
-    ElMessage.error('操作失败，请重试')
-    return
-  }
-  // 仅移除本地 AI 回复及其后续内容，保留用户提问
-  messages.value.splice(index)
-  startStream(prevUser.content, true)
+  const assistantId = isPersistedId(assistant.id) ? assistant.id : undefined
+  const userId = isPersistedId(prevUser.id) ? prevUser.id : undefined
+  // 用户消息已存在：reuse=true 不重复保存；回复就地覆盖原行
+  startStream(prevUser.content, true, assistantId, userId)
 }
 
 /** 判断消息 ID 是否为服务端持久化 ID（本地临时 ID 为 Date.now() 时间戳） */
@@ -663,6 +821,8 @@ function handleScroll() {
  */
 function scrollToBottom(force = false) {
   if (!force && !autoFollow.value) return
+  // 空状态（仅展示欢迎页）无需滚动，避免把居中内容顶出视口
+  if (messages.value.length === 0 && !streamingMsg.value) return
   if (scrollPending) return
   scrollPending = true
   nextTick(() => {
@@ -671,6 +831,8 @@ function scrollToBottom(force = false) {
     if (!el) return
     // 二次校验：等待 DOM 更新期间用户可能已上翻，此时不应再把视口拉回底部
     if (!force && !autoFollow.value) return
+    // 内容不足一屏（或仅溢出几像素）时无需滚动
+    if (el.scrollHeight - el.clientHeight < 4) return
     el.scrollTop = el.scrollHeight
     autoFollow.value = true
   })
@@ -802,20 +964,34 @@ function hideQuizAnswers(text: string): string {
 .chat-box {
   flex: 1;
   overflow-y: auto;
-  padding: 24px;
+  padding: 28px 24px 12px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 26px;
+  /* 内容区限制宽度并居中：与 DeepSeek 一致，长行更易读 */
+  scrollbar-gutter: stable;
 }
-.msg {
-  max-width: 75%;
-  padding: 14px 18px;
-  border-radius: var(--radius-lg);
-  line-height: 1.7;
-  font-size: 14px;
-  word-break: break-word;
-  position: relative;
+/*
+  空状态（仅欢迎页）：垂直居中。
+  使用 safe center —— 内容溢出时回退为 flex-start，避免"居中导致顶部被裁且无法滚动"。
+*/
+.chat-box.is-empty {
+  justify-content: safe center;
+}
+/* ---------- 消息行：用户右对齐、AI 左对齐 ---------- */
+.msg-row {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 780px;
+  margin: 0 auto;
   animation: msg-in var(--t-normal) var(--ease-spring) both;
+}
+.msg-row.user {
+  align-items: flex-end;
+}
+.msg-row.assistant {
+  align-items: flex-start;
 }
 @keyframes msg-in {
   from {
@@ -827,28 +1003,87 @@ function hideQuizAnswers(text: string): string {
     transform: translateY(0);
   }
 }
-.msg.user {
-  background: var(--gradient-primary);
-  color: #fff;
-  margin-left: auto;
-  border-bottom-right-radius: var(--radius-sm);
-  box-shadow: var(--shadow-primary);
+.msg-main {
+  max-width: 100%;
+  line-height: 1.75;
+  font-size: 15px;
+  word-break: break-word;
 }
-/* AI 回复: 流式中(.ai) 与 历史消息(.assistant) 使用同一卡片样式 */
-.msg.ai,
-.msg.assistant {
-  background: var(--color-muted);
+.msg-row.user .msg-main {
+  max-width: 78%;
+}
+/* 编辑态：解除气泡宽度限制，让编辑卡片有舒展的空间 */
+.msg-row.user.is-editing .msg-main {
+  width: 100%;
+  max-width: 100%;
+}
+/* 用户气泡：淡雅浅紫底 + 深色文字（DeepSeek 淡雅风格，避免高饱和造成视觉疲劳） */
+.bubble.user-bubble {
+  padding: 12px 16px;
+  border-radius: 16px;
+  background: var(--color-primary-50);
+  border: 1px solid var(--color-primary-100);
   color: var(--color-foreground);
-  border: 1px solid var(--color-border);
-  border-bottom-left-radius: var(--radius-sm);
+  font-size: 15px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
-.msg.ai.typing .cursor {
-  animation: blink 1s infinite;
+/* AI 内容：无气泡，直接铺排，与页面背景融合 */
+.msg-row.assistant .msg-main {
+  padding: 2px 0;
+  color: var(--color-foreground);
+}
+/* 流式光标 */
+.cursor {
+  display: inline-block;
   color: var(--color-primary);
+  animation: blink 1s infinite;
 }
 @keyframes blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
+}
+/* ---------- 操作栏：位于气泡下方外部，图标 + 文字 ---------- */
+.msg-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 8px;
+  opacity: 0.65;
+  transition: opacity var(--t-fast) var(--ease);
+}
+.msg-row:hover .msg-actions,
+.msg-row:focus-within .msg-actions {
+  opacity: 1;
+}
+.act-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 9px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-muted-foreground);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: all var(--t-fast) var(--ease);
+}
+.act-btn .el-icon {
+  font-size: 14px;
+}
+.act-btn:hover:not(:disabled) {
+  background: var(--color-primary-50);
+  color: var(--color-primary);
+}
+.act-btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
+}
+.act-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 /* RAG 检索标记: 附着在 AI 消息顶部，展示知识库命中情况 */
 .rag-badge {
@@ -864,6 +1099,12 @@ function hideQuizAnswers(text: string): string {
   line-height: 1.6;
   cursor: default;
   user-select: none;
+}
+/* 未命中 / 内容不相关：降饱和为中性灰，避免紫色的“命中”暗示 */
+.rag-badge.muted {
+  background: var(--color-muted);
+  border-color: var(--color-border);
+  color: var(--color-muted-foreground);
 }
 .rag-content {
   display: inline-flex;
@@ -884,139 +1125,260 @@ function hideQuizAnswers(text: string): string {
 .rag-tip p:last-child {
   margin-bottom: 0;
 }
-/* 消息操作条: 常态可见（触屏可用），悬停高亮 */
-.msg-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 4px;
-  margin-top: 6px;
-  opacity: 0.55;
-  transition: opacity var(--t-fast) var(--ease);
-}
-.msg:hover .msg-actions,
-.msg:focus-within .msg-actions {
-  opacity: 1;
-}
-.act-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--color-muted-foreground);
-  font-size: 14px;
-  cursor: pointer;
-  transition: all var(--t-fast) var(--ease);
-}
-.act-btn:hover:not(:disabled) {
-  background: var(--color-primary-50);
-  color: var(--color-primary);
-}
-.act-btn:focus-visible {
-  outline: 2px solid var(--color-primary);
-  outline-offset: 1px;
-}
-.act-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-/* 用户消息气泡为渐变紫底，操作按钮使用反白色 */
-.msg.user .act-btn {
-  color: rgba(255, 255, 255, 0.85);
-}
-.msg.user .act-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.2);
-  color: #fff;
-}
-/* 编辑态: 消息气泡内展开的输入框 */
+/* ---------- 编辑态：内联编辑卡片（沿用输入区语言：大圆角 + 品牌描边 + 柔和外发光） ---------- */
 .edit-box {
-  width: min(560px, 58vw);
+  width: min(680px, 100%);
+  margin-left: auto;
+  padding: 12px 14px 11px;
+  border: 1.5px solid var(--color-primary-200);
+  border-radius: 16px;
+  background: var(--color-card);
+  box-shadow: 0 0 0 4px var(--color-primary-50), var(--shadow-sm);
+  animation: edit-in var(--t-normal) var(--ease-spring) both;
+  transition: border-color var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
 }
+/* 聚焦整卡高亮：外层描边 + 外发光（内层文本域因此不再重复画焦点环） */
+.edit-box:focus-within {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 4px var(--color-primary-100), var(--shadow-md);
+}
+@keyframes edit-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+/* 文本域：去掉 Element 默认灰边框，改为浅底无边框；聚焦时转白底由卡片承担高亮 */
 .edit-box :deep(.el-textarea__inner) {
-  border-radius: var(--radius-md);
-  font-size: 14px;
-  line-height: 1.6;
+  padding: 11px 13px;
+  border: none;
+  border-radius: 12px;
+  background: var(--color-muted);
+  box-shadow: none;
+  color: var(--color-foreground);
+  font-size: 15px;
+  line-height: 1.7;
+  transition: background var(--t-fast) var(--ease);
+}
+.edit-box :deep(.el-textarea__inner:hover) {
+  background: var(--color-primary-50);
+}
+/* 聚焦时仅由外层卡片承担高亮，故这里抹掉全局 textarea 焦点环（全局规则用了 !important） */
+.edit-box :deep(.el-textarea__inner:focus) {
+  background: var(--color-card);
+  box-shadow: none !important;
 }
 .edit-actions {
   display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 8px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
 }
-.msg.user .edit-actions :deep(.el-button:not(.el-button--primary)) {
-  background: rgba(255, 255, 255, 0.16);
-  border-color: rgba(255, 255, 255, 0.4);
-  color: #fff;
+/* 快捷键提示：kbd 键帽样式，弱化但可读 */
+.edit-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--color-muted-foreground);
+  font-size: 11.5px;
+  user-select: none;
 }
-.welcome-msg {
-  position: relative;
-  background: var(--color-card);
+.edit-hint kbd {
+  padding: 0 5px;
+  height: 18px;
+  line-height: 16px;
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
-  padding: 56px 40px;
-  text-align: center;
-  align-self: center;
-  margin: auto;
-  box-shadow: var(--shadow-sm);
-  overflow: hidden;
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--color-muted);
+  color: var(--color-muted-foreground);
+  font-family: inherit;
+  font-size: 10.5px;
 }
-/* 欢迎区顶部渐变装饰条 */
-.welcome-msg::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 4px;
+.edit-hint .sep,
+.edit-hint .plus {
+  margin: 0 2px;
+  opacity: 0.6;
+}
+.edit-btns {
+  display: flex;
+  gap: 8px;
+}
+.edit-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--t-fast) var(--ease);
+}
+.edit-btn.ghost {
+  background: transparent;
+  border-color: var(--color-border);
+  color: var(--color-muted-foreground);
+}
+.edit-btn.ghost:hover {
+  background: var(--color-muted);
+  border-color: #D9D5E8;
+  color: var(--color-foreground);
+}
+.edit-btn.primary {
+  background: var(--gradient-primary);
+  color: #fff;
+  box-shadow: var(--shadow-xs);
+}
+.edit-btn.primary:hover {
+  box-shadow: var(--shadow-primary);
+  transform: translateY(-1px);
+}
+.edit-btn.primary:active {
+  transform: translateY(0);
+  box-shadow: var(--shadow-xs);
+}
+.edit-btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+/* ---------- 欢迎区：DeepSeek 风格（居中图标 + 标题 + 建议卡片） ---------- */
+.welcome-msg {
+  margin: 0 auto;
+  text-align: center;
+  max-width: 620px;
+  padding: 8px;
+  animation: msg-in var(--t-slow) var(--ease-spring) both;
+}
+.welcome-icon {
+  width: 52px;
+  height: 52px;
+  margin: 0 auto 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 16px;
+  color: #fff;
   background: var(--gradient-brand);
+  box-shadow: var(--shadow-primary);
 }
 .welcome-msg h3 {
-  margin-bottom: 8px;
-  font-size: 22px;
+  margin: 0 0 8px;
+  font-size: 24px;
   font-weight: 700;
   letter-spacing: -0.5px;
 }
 .welcome-msg p {
   color: var(--color-muted-foreground);
-  margin-bottom: 28px;
+  margin: 0 0 26px;
+  font-size: 14px;
 }
 .quick-actions {
-  display: flex;
-  gap: 10px;
-  justify-content: center;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
 }
-.quick-actions :deep(.el-button) {
-  border-color: var(--color-primary-200);
-  color: var(--color-primary);
+/* 建议卡片：图标 + 标题 + 说明，悬停上浮 */
+.quick-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 14px 16px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-card);
+  text-align: left;
+  cursor: pointer;
   transition: all var(--t-normal) var(--ease);
 }
-.quick-actions :deep(.el-button:hover) {
+.quick-card .qc-icon {
+  font-size: 17px;
+  color: var(--color-primary);
+  margin-bottom: 3px;
+}
+.quick-card .qc-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-foreground);
+}
+.quick-card .qc-desc {
+  font-size: 12px;
+  color: var(--color-muted-foreground);
+  line-height: 1.5;
+}
+.quick-card:hover {
+  border-color: var(--color-primary-200);
   background: var(--color-primary-50);
-  border-color: var(--color-primary);
   transform: translateY(-2px);
-  box-shadow: 0 6px 16px rgba(124, 58, 237, 0.18);
+  box-shadow: var(--shadow-sm);
+}
+.quick-card:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+@media (max-width: 560px) {
+  .quick-actions {
+    grid-template-columns: 1fr;
+  }
 }
 .input-area {
   /* 作为“回到最新”悬浮按钮的定位锚点 */
   position: relative;
-  padding: 16px 24px;
+  padding: 14px 24px 16px;
   border-top: 1px solid var(--color-border);
-  background: linear-gradient(180deg, rgba(248, 248, 252, 0) 0%, rgba(245, 243, 255, 0.5) 100%);
+  background: var(--color-card);
 }
-/* 用户上翻阅读时的“回到最新”入口：悬浮在输入区上方，不遮挡消息内容 */
+/* 输入行：与消息区同宽居中，大圆角输入框（DeepSeek 风格） */
+.input-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  max-width: 780px;
+  margin: 0 auto;
+}
+.input-row :deep(.el-textarea__inner) {
+  min-height: 48px !important;
+  max-height: 160px;
+  padding: 13px 16px;
+  border-radius: 16px;
+  font-size: 15px;
+  line-height: 1.6;
+  background: var(--color-muted);
+  box-shadow: 0 0 0 1px var(--color-border) inset;
+  transition: box-shadow var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
+}
+.input-row :deep(.el-textarea__inner:hover) {
+  background: var(--color-card);
+}
+/* 聚焦：品牌色描边 + 柔和外发光 */
+.input-row :deep(.el-textarea__inner:focus) {
+  background: var(--color-card);
+  box-shadow: 0 0 0 1.5px var(--color-primary) inset, 0 0 0 3px var(--color-primary-100);
+}
+.input-row :deep(.el-button) {
+  height: 48px;
+  min-width: 76px;
+  border-radius: 16px;
+  font-weight: 600;
+}
+/* 用户上翻阅读时的"回到最新"入口：悬浮在输入区上方居中，避免遮挡消息两侧的操作栏 */
 .scroll-to-bottom {
   position: absolute;
-  right: 24px;
+  left: 50%;
   bottom: calc(100% + 12px);
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 36px;
+  height: 34px;
   padding: 0 14px;
   border: 1px solid var(--color-border);
   border-radius: 999px;
@@ -1026,10 +1388,11 @@ function hideQuizAnswers(text: string): string {
   font-weight: 500;
   cursor: pointer;
   box-shadow: var(--shadow-md);
-  transition: transform var(--t-fast) var(--ease), box-shadow var(--t-fast) var(--ease);
+  transform: translateX(-50%);
+  transition: box-shadow var(--t-fast) var(--ease), background var(--t-fast) var(--ease);
 }
 .scroll-to-bottom:hover {
-  transform: translateY(-1px);
+  background: var(--color-primary-50);
   box-shadow: var(--shadow-lg);
 }
 .scroll-to-bottom:focus-visible {
@@ -1046,17 +1409,7 @@ function hideQuizAnswers(text: string): string {
 .fade-up-enter-from,
 .fade-up-leave-to {
   opacity: 0;
-  transform: translateY(6px);
-}
-.input-row {
-  display: flex;
-  gap: 12px;
-  align-items: flex-end;
-}
-.input-row :deep(.el-textarea__inner) {
-  min-height: 44px !important;
-  max-height: 120px;
-  border-radius: 12px;
+  transform: translateX(-50%) translateY(6px);
 }
 .input-hint {
   text-align: center;
@@ -1087,8 +1440,26 @@ function hideQuizAnswers(text: string): string {
   .sidebar.open {
     left: 0;
   }
-  .msg {
-    max-width: 90%;
+  /* 窄屏：用户气泡放宽，消息区留白收窄 */
+  .msg-row.user .msg-main {
+    max-width: 88%;
+  }
+  .chat-box {
+    padding: 20px 14px 8px;
+  }
+  /* 窄屏：隐藏快捷键提示，按钮占满整行便于点按 */
+  .edit-hint {
+    display: none;
+  }
+  .edit-actions {
+    justify-content: flex-end;
+  }
+  .edit-btns {
+    flex: 1;
+  }
+  .edit-btn {
+    flex: 1;
+    height: 38px;
   }
 }
 </style>

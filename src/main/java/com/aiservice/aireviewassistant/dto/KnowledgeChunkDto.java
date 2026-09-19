@@ -13,7 +13,6 @@ import java.util.UUID;
 @Getter
 @Setter
 public class KnowledgeChunkDto {
-
     /** 向量记录唯一标识（向量数据库中的主键）。 */
     private UUID id;
 
@@ -25,6 +24,9 @@ public class KnowledgeChunkDto {
 
     /** 所属课程 ID。 */
     private Integer courseId;
+
+    /** 当前分块所属的原始文件/资料名称；历史数据可能为空。 */
+    private String fileName;
 
     /** 当前分块在原文档中的序号，从 0 开始。 */
     private Integer chunkIndex;

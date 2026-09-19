@@ -4,13 +4,16 @@ import com.aiservice.aireviewassistant.agent.tool.AgentTool;
 import com.aiservice.aireviewassistant.agent.tool.ChainExecutor;
 import com.aiservice.aireviewassistant.agent.tool.ToolContext;
 import com.aiservice.aireviewassistant.agent.tool.ToolRegistry;
+import com.aiservice.aireviewassistant.config.AppProperties;
 import com.aiservice.aireviewassistant.config.PromptTemplate;
 import com.aiservice.aireviewassistant.entity.AgentLog;
 import com.aiservice.aireviewassistant.entity.Conversation;
+import com.aiservice.aireviewassistant.entity.Courses;
 import com.aiservice.aireviewassistant.entity.Message;
 import com.aiservice.aireviewassistant.metrics.AgentMetrics;
 import com.aiservice.aireviewassistant.service.AgentLogService;
 import com.aiservice.aireviewassistant.service.ConversationService;
+import com.aiservice.aireviewassistant.service.CoursesService;
 import com.aiservice.aireviewassistant.service.MessageService;
 import com.aiservice.aireviewassistant.service.RagService;
 import com.aiservice.aireviewassistant.service.ReviewRecordsService;
@@ -28,7 +31,10 @@ import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * AI Review Assistant 的核心 Agent 编排类。
@@ -79,6 +85,32 @@ public class ReviewAssistantAgent {
     /** 学习计划服务，用于在生成学习计划后自动归档。 */
     private final StudyPlanService studyPlanService;
 
+    /** 课程服务，用于将消息中的课程前缀解析为课程 ID（学习统计课程覆盖率）。 */
+    private final CoursesService coursesService;
+
+    /** 业务配置，用于读取学习统计相关开关。 */
+    private final AppProperties appProperties;
+
+    /** 前端在选中课程时拼入消息首部的课程前缀，如 {@code [课程: 操作系统] 复习一下}。 */
+    private static final Pattern COURSE_PREFIX_PATTERN = Pattern.compile("^\\[课程[:：]\\s*([^\\]]+)\\]");
+
+    /**
+     * 社交性短语（归一化后匹配）：命中则视为闲聊，不计入复习统计。
+     * <p>包含问候、致谢、道别与询问助手身份等与学习内容无关的对话。</p>
+     */
+    private static final List<String> CASUAL_PHRASES = List.of(
+        "你好", "您好", "嗨", "哈喽", "hello", "hi", "在吗", "在么", "在不在",
+        "谢谢", "多谢", "感谢", "再见", "拜拜", "晚安", "早安", "早上好", "下午好", "晚上好",
+        "好的", "好滴", "嗯", "哦", "ok", "okay", "哈哈", "嘿嘿", "嘻嘻",
+        "你是谁", "你叫什么", "介绍一下你自己", "你能做什么", "你会做什么", "你能干什么"
+    );
+
+    /**
+     * 纯闲聊的最大归一化长度。
+     * <p>超过该长度说明消息包含实质内容（如“你好，什么是进程”），不再当作闲聊过滤。</p>
+     */
+    private static final int MAX_CASUAL_LENGTH = 5;
+
     /**
      * 构造核心 Agent，由 Spring 注入所有依赖组件。
      *
@@ -93,13 +125,16 @@ public class ReviewAssistantAgent {
      * @param chainExecutor       工具链执行器
      * @param objectMapper        JSON 工具
      * @param studyPlanService    学习计划服务
+     * @param coursesService      课程服务
+     * @param appProperties       业务配置（学习统计开关）
      */
     public ReviewAssistantAgent(ToolRegistry toolRegistry, ChatClient chatClient,
                                 ConversationService conversationService, MessageService messageService,
                                 AgentLogService agentLogService, ReviewRecordsService reviewRecordsService,
                                 PromptTemplate promptTemplate, AgentMetrics agentMetrics,
                                 ChainExecutor chainExecutor, ObjectMapper objectMapper,
-                                StudyPlanService studyPlanService) {
+                                StudyPlanService studyPlanService, CoursesService coursesService,
+                                AppProperties appProperties) {
         this.toolRegistry = toolRegistry;
         this.chatClient = chatClient;
         this.conversationService = conversationService;
@@ -111,6 +146,8 @@ public class ReviewAssistantAgent {
         this.chainExecutor = chainExecutor;
         this.objectMapper = objectMapper;
         this.studyPlanService = studyPlanService;
+        this.coursesService = coursesService;
+        this.appProperties = appProperties;
     }
 
     /**
@@ -190,6 +227,19 @@ public class ReviewAssistantAgent {
      * @return 展示给用户的文本响应；异常时返回友好错误提示
      */
     public String chat(String userMessage, Integer conversationId, Integer userId) {
+        return chat(userMessage, conversationId, userId, null);
+    }
+
+    /**
+     * Agent 核心对话入口（普通非流式模式，带用户身份与课程上下文）。
+     *
+     * @param userMessage    用户输入消息
+     * @param conversationId 会话 ID，可为 null
+     * @param userId         用户 ID，可为 null
+     * @param courseId       当前选中的课程 ID，可为 null；用于绑定会话课程以便学习统计
+     * @return 展示给用户的文本响应；异常时返回友好错误提示
+     */
+    public String chat(String userMessage, Integer conversationId, Integer userId, Integer courseId) {
         long startTime = System.currentTimeMillis();
         String intent = null;
         Map<String, String> params = null;
@@ -198,7 +248,7 @@ public class ReviewAssistantAgent {
         boolean success = false;
         try {
             // 获取或创建会话，同时更新会话标题与最近活动时间
-            conversation = getOrCreateConversation(conversationId, userMessage, userId);
+            conversation = getOrCreateConversation(conversationId, userMessage, userId, courseId);
             convId = conversation.getId();
 
             // 持久化用户原始消息，便于后续多轮记忆与审计
@@ -213,7 +263,8 @@ public class ReviewAssistantAgent {
                 ChainExecutor.ChainExecution execution = chainExecutor.execute(userMessage, convId, history);
                 String chainResponse = execution.text();
                 saveMessage(convId, "assistant", chainResponse, "CHAIN");
-                saveReviewRecord(convId, conversation != null ? conversation.getUserId() : null, userMessage, chainResponse);
+                saveReviewRecord(convId, conversation != null ? conversation.getUserId() : null,
+                    "CHAIN", userMessage, chainResponse);
                 saveAgentLog(convId, userMessage, "CHAIN", params, startTime, true, null);
                 agentMetrics.incrementToolCall("CHAIN");
                 // 链式请求中的计划步骤同样需要归档到学习计划板块
@@ -256,8 +307,9 @@ public class ReviewAssistantAgent {
 
             // 保存AI回复（内部保存完整版，含答案；展示给用户隐藏版）
             saveMessage(convId, "assistant", rawResponse, intent);
-            // 保存复习记录
-            saveReviewRecord(convId, conversation != null ? conversation.getUserId() : null, userMessage, rawResponse);
+            // 保存复习记录（闲聊不计入统计）
+            saveReviewRecord(convId, conversation != null ? conversation.getUserId() : null,
+                intent, userMessage, rawResponse);
             // 记录成功日志
             saveAgentLog(convId, userMessage, intent, params, startTime, true, null);
             // 记录指标
@@ -375,24 +427,68 @@ public class ReviewAssistantAgent {
      */
     public Flux<String> chatStream(String userMessage, Integer conversationId, Integer userId,
                                    Boolean reuseUserMessage) {
+        return chatStream(userMessage, conversationId, userId, reuseUserMessage, null);
+    }
+
+    /**
+     * Agent 核心对话入口（流式 SSE 模式，带用户身份、重新生成与课程上下文）。
+     *
+     * @param userMessage      用户输入消息
+     * @param conversationId   会话 ID，可为 null
+     * @param userId           用户 ID，可为 null
+     * @param reuseUserMessage 为 true 时视为“重新生成”：不重复保存用户消息，也不重复计入复习记录
+     * @param courseId         当前选中的课程 ID，可为 null；用于绑定会话课程以便学习统计
+     * @return 包含会话元数据与流式内容的 {@link Flux}
+     */
+    public Flux<String> chatStream(String userMessage, Integer conversationId, Integer userId,
+                                   Boolean reuseUserMessage, Integer courseId) {
+        return chatStream(userMessage, conversationId, userId, reuseUserMessage, courseId, null, null);
+    }
+
+    /**
+     * Agent 核心对话入口（流式模式，支持“就地重生成”）。
+     * <p>相比 5 参数版本额外支持两种<b>非破坏性</b>场景：</p>
+     * <ul>
+     *   <li>{@code assistantMessageId}：把本次生成的 AI 回复<b>覆盖写入</b>指定的历史消息行，
+     *       而不是追加新消息。这样“编辑提问”与“重新生成”都不会删除任何历史记录，
+     *       消息顺序（时间戳）也保持不变。</li>
+     *   <li>{@code historyBeforeId}：只加载该消息之前的历史作为上下文，
+     *       使编辑后的提问基于“编辑点之前的对话”重新生成，不被其后的旧回复干扰。</li>
+     * </ul>
+     *
+     * @param userMessage        用户输入消息
+     * @param conversationId     会话 ID，可为 null
+     * @param userId             用户 ID，可为 null
+     * @param reuseUserMessage   为 true 时不重复保存用户消息（内容已存在或已就地更新）
+     * @param courseId           当前选中的课程 ID，可为 null
+     * @param assistantMessageId 需要就地覆盖的 AI 消息 ID，为 null 时追加新消息
+     * @param historyBeforeId    上下文截断点（只取 id 小于该值的历史消息），可为 null
+     * @return 包含会话元数据与流式内容的 {@link Flux}
+     */
+    public Flux<String> chatStream(String userMessage, Integer conversationId, Integer userId,
+                                   Boolean reuseUserMessage, Integer courseId,
+                                   Integer assistantMessageId, Integer historyBeforeId) {
         long startTime = System.currentTimeMillis();
         String intent = null;
         Map<String, String> params = null;
         Integer convId = null;
         Conversation conversation = null;
         final boolean reuse = Boolean.TRUE.equals(reuseUserMessage);
+        final Integer overwriteMessageId = assistantMessageId;
         try {
-            conversation = getOrCreateConversation(conversationId, userMessage, userId);
+            conversation = getOrCreateConversation(conversationId, userMessage, userId, courseId);
             convId = conversation.getId();
 
-            // 持久化用户原始消息（“重新生成”场景下用户消息已存在，避免重复保存）
+            // 持久化用户原始消息（“编辑/重新生成”场景下消息已存在或已就地更新，避免重复保存）
             if (!reuse) {
                 saveMessage(convId, "user", userMessage, null);
             }
 
-            // 加载历史消息并复用；重新生成时去掉末尾重复的当前用户消息（由工具重新拼接）
-            List<Message> history = loadHistory(convId);
-            if (reuse) {
+            // 加载历史消息作为上下文；指定了截断点时只取该消息之前的历史
+            List<Message> history = historyBeforeId != null
+                ? loadHistoryBefore(convId, historyBeforeId)
+                : loadHistory(convId);
+            if (reuse && historyBeforeId == null) {
                 history = trimTrailingUserMessage(history, userMessage);
             }
 
@@ -411,12 +507,12 @@ public class ReviewAssistantAgent {
                     .doOnNext(chainBuffer::append)
                     .doOnComplete(() -> {
                         String fullText = chainBuffer.toString();
-                        saveMessage(chainConvId, "assistant", fullText, "CHAIN");
+                        saveAssistantMessage(chainConvId, overwriteMessageId, fullText, "CHAIN");
                         // 重新生成场景不重复计入复习记录，避免统计数据虚高
                         if (!reuse) {
                             saveReviewRecord(chainConvId,
                                     chainConversation != null ? chainConversation.getUserId() : null,
-                                    userMessage, fullText);
+                                    "CHAIN", userMessage, fullText);
                         }
                         saveAgentLog(chainConvId, userMessage, "CHAIN", null, startTime, true, null);
                         // 链式请求中的计划步骤同样需要归档到学习计划板块
@@ -480,10 +576,12 @@ public class ReviewAssistantAgent {
                     successFlag[0] = true;
                     String fullResponse = contentBuffer.toString();
                     // 流式结束后一次性保存完整 AI 回复、复习记录与日志
-                    saveMessage(finalConvId, "assistant", fullResponse, finalIntent);
+                    // 编辑/重新生成场景：就地覆盖原消息行，保证历史记录一条不丢
+                    saveAssistantMessage(finalConvId, overwriteMessageId, fullResponse, finalIntent);
                     // 重新生成场景不重复计入复习记录，避免统计数据虚高
                     if (!reuse) {
-                        saveReviewRecord(finalConvId, finalConversation != null ? finalConversation.getUserId() : null, userMessage, fullResponse);
+                        saveReviewRecord(finalConvId, finalConversation != null ? finalConversation.getUserId() : null,
+                            finalIntent, userMessage, fullResponse);
                     }
                     saveAgentLog(finalConvId, userMessage, finalIntent, finalParams, startTime, true, null);
                     // 学习计划生成完毕后自动保存到学习计划板块
@@ -521,7 +619,8 @@ public class ReviewAssistantAgent {
                     String partial = contentBuffer.toString().trim();
                     String fallback;
                     if (!partial.isEmpty()) {
-                        saveMessage(finalConvId, "assistant", partial + "\n\n[系统提示] 生成被网络中断，以上内容已保存。", finalIntent);
+                        saveAssistantMessage(finalConvId, overwriteMessageId,
+                            partial + "\n\n[系统提示] 生成被网络中断，以上内容已保存。", finalIntent);
                         fallback = "\n\n[系统提示] 生成被网络中断，以上内容已保存，请重试或继续提问。";
                     } else {
                         fallback = "[系统提示] 网络连接不稳定，生成被中断。请稍后重试。";
@@ -807,13 +906,24 @@ public class ReviewAssistantAgent {
      * 若传入有效的 conversationId，则校验存在性并更新最近活动时间；
      * 若标题仍为占位符（“新对话”或空），则使用当前用户消息前 30 字重命名。
      * 未传入或不存在时，新建会话并持久化。
+     * </p>
+     * <p>
+     * 课程绑定：优先使用显式传入的 courseId；未传时尝试从消息的
+     * {@code [课程: 名称]} 前缀解析（前端选中课程时自动添加），
+     * 解析成功则写入 conversation.course_id，使复习记录带上课程，
+     * 供学习统计的“课程覆盖率”维度使用。切换课程时会同步更新。
+     * </p>
      *
      * @param conversationId 会话 ID，可为 null
-     * @param userMessage    当前用户消息，用于生成会话标题
+     * @param userMessage    当前用户消息，用于生成会话标题与解析课程
      * @param userId         用户 ID，可为 null；为 null 时记为 anonymous
+     * @param courseId       当前课程 ID，可为 null
      * @return 获取或创建后的会话对象
      */
-    private Conversation getOrCreateConversation(Integer conversationId, String userMessage, Integer userId) {
+    private Conversation getOrCreateConversation(Integer conversationId, String userMessage,
+                                                 Integer userId, Integer courseId) {
+        // 解析课程：显式参数优先，其次从 [课程: xxx] 前缀按名称查找该用户的课程
+        Integer resolvedCourseId = courseId != null ? courseId : resolveCourseIdFromMessage(userMessage, userId);
         if (conversationId != null) {
             Conversation exist = conversationService.getById(conversationId);
             if (exist != null) {
@@ -821,6 +931,10 @@ public class ReviewAssistantAgent {
                 if ("新对话".equals(exist.getTitle()) || exist.getTitle() == null || exist.getTitle().isEmpty()) {
                     String title = userMessage.length() > 30 ? userMessage.substring(0, 30) + "..." : userMessage;
                     exist.setTitle(title);
+                }
+                // 绑定/更新会话课程：用户切换课程后再对话时同步为最新课程
+                if (resolvedCourseId != null && !resolvedCourseId.equals(exist.getCourseId())) {
+                    exist.setCourseId(resolvedCourseId);
                 }
                 // 更新会话最近活动时间，保证会话列表排序准确
                 exist.setUpdatedAt(LocalDateTime.now());
@@ -833,8 +947,44 @@ public class ReviewAssistantAgent {
         String title = userMessage.length() > 30 ? userMessage.substring(0, 30) + "..." : userMessage;
         conversation.setTitle(title);
         conversation.setUserId(userId != null ? String.valueOf(userId) : "anonymous");
+        conversation.setCourseId(resolvedCourseId);
         conversationService.save(conversation);
         return conversation;
+    }
+
+    /**
+     * 从用户消息的 {@code [课程: 名称]} 前缀解析课程 ID。
+     * <p>
+     * 前端在选中课程后会把课程名以该前缀拼入消息首部；此处按名称在该用户名下查找课程。
+     * 解析失败（无前缀、课程不存在、未登录）时返回 null，不影响正常对话。
+     * </p>
+     *
+     * @param userMessage 用户消息
+     * @param userId      用户 ID，可为 null
+     * @return 匹配到的课程 ID；无法解析时返回 null
+     */
+    private Integer resolveCourseIdFromMessage(String userMessage, Integer userId) {
+        if (userMessage == null || userId == null) {
+            return null;
+        }
+        Matcher matcher = COURSE_PREFIX_PATTERN.matcher(userMessage);
+        if (!matcher.find()) {
+            return null;
+        }
+        String courseName = matcher.group(1).trim();
+        if (courseName.isEmpty()) {
+            return null;
+        }
+        try {
+            Courses course = coursesService.lambdaQuery()
+                .eq(Courses::getUserId, userId)
+                .eq(Courses::getName, courseName)
+                .one();
+            return course != null ? course.getId() : null;
+        } catch (Exception e) {
+            log.debug("[Agent] 解析课程名失败: {}", e.getMessage());
+            return null;
+        }
     }
 
     /**
@@ -859,6 +1009,57 @@ public class ReviewAssistantAgent {
         } catch (Exception e) {
             log.warn("[Agent] 保存消息失败: {}", e.getMessage());
         }
+    }
+
+    /**
+     * 保存或就地覆盖一条 AI 回复消息。
+     * <p>用于“编辑提问”与“重新生成”场景：当传入已存在的消息 ID 时直接更新该行内容，
+     * 不新增消息、也不删除其后的任何记录，从而完整保留对话历史与消息顺序；
+     * 目标消息不存在（已删除）时自动降级为追加新消息。</p>
+     *
+     * @param conversationId 所属会话 ID
+     * @param existingId     需要覆盖的 AI 消息 ID，为 null 时追加新消息
+     * @param content        新生成的回复内容
+     * @param intent         本次意图
+     */
+    private void saveAssistantMessage(Integer conversationId, Integer existingId, String content, String intent) {
+        if (existingId != null) {
+            try {
+                Message exist = messageService.getById(existingId);
+                if (exist != null) {
+                    exist.setContent(content);
+                    exist.setIntent(intent);
+                    messageService.updateById(exist);
+                    log.debug("[Agent] 已就地覆盖 AI 回复: messageId={}", existingId);
+                    return;
+                }
+                log.warn("[Agent] 目标回复消息不存在，改为追加新消息: messageId={}", existingId);
+            } catch (Exception e) {
+                log.warn("[Agent] 覆盖 AI 回复失败，改为追加新消息: {}", e.getMessage());
+            }
+        }
+        saveMessage(conversationId, "assistant", content, intent);
+    }
+
+    /**
+     * 加载截断点之前的历史消息（编辑场景专用）。
+     * <p>只取 id 小于截断点的消息，即“被编辑提问之前的对话”，
+     * 保证重新生成时上下文与编辑点之后的历史无关。</p>
+     *
+     * @param conversationId  会话 ID
+     * @param historyBeforeId 截断点消息 ID（不含该条）
+     * @return 历史消息列表；无历史时返回空列表
+     */
+    private List<Message> loadHistoryBefore(Integer conversationId, Integer historyBeforeId) {
+        if (historyBeforeId == null) {
+            return loadHistory(conversationId);
+        }
+        return messageService.lambdaQuery()
+            .eq(Message::getConversationId, conversationId)
+            .lt(Message::getId, historyBeforeId)
+            .orderByAsc(Message::getCreatedAt)
+            .last("LIMIT 10")
+            .list();
     }
 
     /**
@@ -896,19 +1097,78 @@ public class ReviewAssistantAgent {
     /**
      * 将问答对沉淀到复习记录（错题本/复习本）。
      * <p>
+     * 过滤规则：闲聊（问候、致谢、道别、询问助手身份等）不计入复习统计，
+     * 避免“你好”这类无学习内容的对话虚增复习次数、活跃天数与综合评分；
+     * 学习类意图（问答/出题/总结/解释/计划/链式）一律记录。
+     * 是否过滤由 {@code app.stats.skip-casual-chat} 控制（默认开启）。
      * 保存失败仅记录 warn，避免影响主响应流程。
      *
      * @param conversationId 所属会话 ID
      * @param userId         用户 ID
+     * @param intent         本次请求识别到的意图
      * @param question       问题/用户消息
      * @param answer         AI 生成的答案
      */
-    private void saveReviewRecord(Integer conversationId, String userId, String question, String answer) {
+    private void saveReviewRecord(Integer conversationId, String userId, String intent,
+                                  String question, String answer) {
+        if (!shouldRecordReview(intent, question)) {
+            log.debug("[Agent] 闲聊消息不计入复习统计: intent={}, message={}", intent, question);
+            return;
+        }
         try {
             reviewRecordsService.saveFromAgent(conversationId, userId, question, answer);
         } catch (Exception e) {
             log.warn("[Agent] 保存复习记录失败: {}", e.getMessage());
         }
+    }
+
+    /**
+     * 判断本次对话是否应计入复习统计。
+     * <p>
+     * 仅对普通对话（CHAT 意图）应用闲聊过滤：学习类意图即使包含少量社交词也照常记录。
+     * </p>
+     *
+     * @param intent      识别到的意图
+     * @param userMessage 用户消息
+     * @return 需要记录时返回 true
+     */
+    private boolean shouldRecordReview(String intent, String userMessage) {
+        if (!"CHAT".equals(intent)) {
+            return true;
+        }
+        // 配置缺失或关闭过滤时，保持原有行为（全部记录）
+        AppProperties.Stats stats = appProperties != null ? appProperties.getStats() : null;
+        if (stats != null && !stats.isSkipCasualChat()) {
+            return true;
+        }
+        return !isCasualOnly(userMessage);
+    }
+
+    /**
+     * 判断消息是否为纯闲聊（不含实质学习内容）。
+     * <p>
+     * 判定步骤：剥离前端拼接的 {@code [课程: xxx]} 前缀 → 归一化（去空白/标点/符号并转小写）
+     * → 命中社交短语库即视为闲聊。仅当归一化后长度较短时才启用包含匹配，
+     * 使“你好呀”“谢谢老师”等变体也能识别，同时保留“你好，什么叫进程”这类实质提问。
+     * </p>
+     *
+     * @param userMessage 用户消息
+     * @return 纯闲聊时返回 true
+     */
+    private boolean isCasualOnly(String userMessage) {
+        if (userMessage == null || userMessage.isBlank()) {
+            return true;
+        }
+        String text = userMessage.replaceAll("^\\[课程[:：][^\\]]*\\]\\s*", "").trim();
+        // \p{P} 标点、\p{S} 符号：归一化后仅保留文字与数字，避免标点影响匹配
+        String normalized = text.replaceAll("[\\s\\p{P}\\p{S}]+", "").toLowerCase(Locale.ROOT);
+        if (normalized.isEmpty()) {
+            return true;
+        }
+        boolean exact = CASUAL_PHRASES.stream().anyMatch(normalized::equals);
+        boolean shortVariant = normalized.length() <= MAX_CASUAL_LENGTH
+            && CASUAL_PHRASES.stream().anyMatch(normalized::contains);
+        return exact || shortVariant;
     }
 
     /**

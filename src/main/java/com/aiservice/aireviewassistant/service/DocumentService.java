@@ -1,6 +1,7 @@
 package com.aiservice.aireviewassistant.service;
 
 import com.aiservice.aireviewassistant.dto.KnowledgeChunkDto;
+import com.aiservice.aireviewassistant.dto.KnowledgeDocumentDto;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -32,6 +33,35 @@ public interface DocumentService {
      * @return 处理结果描述，包含成功/失败信息及分块数量
      */
     String importContent(Integer courseId, String content);
+
+    /**
+     * 直接导入文本内容（可指定资料名称），分块、向量化后存入向量库。
+     *
+     * @param courseId 课程 ID
+     * @param content  原始文本内容
+     * @param fileName 资料名称，写入分块元数据用于知识库按资料分组展示
+     * @return 处理结果描述，包含成功/失败信息及分块数量
+     */
+    String importContent(Integer courseId, String content, String fileName);
+
+    /**
+     * 查询课程下的资料列表（按上传文件聚合），每份资料包含其全部分块。
+     * <p>用于知识库管理页默认展示资料、点击展开查看分块。</p>
+     *
+     * @param courseId 课程 ID
+     * @return 资料列表；无资料时返回空列表
+     */
+    List<KnowledgeDocumentDto> listDocuments(Integer courseId);
+
+    /**
+     * 查询某份资料的完整原文（用于“预览源文件”）。
+     * <p>优先返回上传时保存的原文；历史资料回退为分块拼接。</p>
+     *
+     * @param courseId 课程 ID
+     * @param fileName 资料名称
+     * @return 完整原文；资料不存在时返回 null
+     */
+    String getDocumentContent(Integer courseId, String fileName);
 
     /**
      * 查询课程下的全部向量分块，按分块索引升序排列。

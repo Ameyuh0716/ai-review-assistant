@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -37,6 +38,13 @@ import java.util.Map;
 @Slf4j
 @Service
 public class RagServiceImpl implements RagService {
+
+    /**
+     * 关键词兜底检索时，关键词需覆盖查询主体的最小百分比。
+     * <p>低于该比例的词被视为“问句中的普通成分”（如“定义”“结构”），
+     * 不作为匹配依据，避免产生与回答相矛盾的假命中。</p>
+     */
+    private static final int DOMINANT_KEYWORD_PERCENT = 60;
 
     private final ChatClient chatClient;
     private final VectorStore vectorStore;
@@ -224,6 +232,10 @@ public class RagServiceImpl implements RagService {
             );
             candidateCount = docs.size();
 
+            // 同一份资料可能被重复导入到多个课程（或重复上传），导致相同内容占据多个 TopK 名额；
+            // 按内容去重（保留相似度最高的一条），把有限名额让给真正不同的片段。
+            docs = dedupeByContent(docs);
+
             // 打印检索调试信息，便于排查召回与阈值问题
             log.debug("========== RAG 检索日志 ==========");
             log.debug("用户问题: {}", question);
@@ -340,10 +352,67 @@ public class RagServiceImpl implements RagService {
     }
 
     /**
+     * 按内容对召回的文档去重，保留相似度最高的一条。
+     * <p>
+     * 背景：同一份资料常被导入到多个课程，或用户重复上传同一文档，
+     * 此时向量库里会存在多份内容完全相同的分块。它们会同时被召回并占据多个 TopK 名额，
+     * 使前端徒劳地显示“命中 3/3”，却只提供了同一个片段（甚至挤掉真正相关的其它片段）。
+     * 此处仅按正文去重，保留分数最高的那条（连同其元数据），保持原有排序。
+     * </p>
+     *
+     * @param docs 向量检索召回（已可能重排序）的文档列表
+     * @return 内容唯一的文档列表，保持原相对顺序
+     */
+    private List<Document> dedupeByContent(List<Document> docs) {
+        if (docs == null || docs.size() <= 1) {
+            return docs;
+        }
+        Map<String, Document> best = new LinkedHashMap<>();
+        for (Document doc : docs) {
+            String key = normalizeContent(doc.getText());
+            Document exist = best.get(key);
+            if (exist == null || scoreOf(doc) > scoreOf(exist)) {
+                best.put(key, doc);
+            }
+        }
+        return new ArrayList<>(best.values());
+    }
+
+    /**
+     * 归一化正文作为去重键：去掉所有空白并转小写，
+     * 使仅缩进/换行差异的同一段落也能被识别为重复。
+     *
+     * @param text 文档正文
+     * @return 归一化后的去重键
+     */
+    private String normalizeContent(String text) {
+        return text == null ? "" : text.replaceAll("\\s+", "").toLowerCase(Locale.ROOT);
+    }
+
+    /**
+     * 安全获取文档相似度分数，为空时视为 0。
+     *
+     * @param doc 文档
+     * @return 分数值
+     */
+    private double scoreOf(Document doc) {
+        return doc.getScore() != null ? doc.getScore() : 0d;
+    }
+
+    /**
      * 关键词兜底检索：向量检索零命中时，按关键词直接匹配知识库内容。
      * <p>
-     * 仅在向量检索完全无结果时触发，因此不会影响正常语义检索的精度；
-     * 按关键词长度降序尝试（越长的词越具体），命中任意一个词即返回，避免召回过多无关片段。
+     * 设计意图：仅服务于“用户只给出宽泛学科名”的场景（如只输入“操作系统”），
+     * 此时查询向量可能因缺乏上下文而低于阈值，但知识库中确实存在该学科资料。
+     * </p>
+     * <p>
+     * 为避免假命中（前端显示“命中”、模型却回答“无相关内容”的矛盾），匹配分两步且都很保守：
+     * <ol>
+     *   <li>先用<b>整句</b>（清洗后）匹配，精确覆盖“只输入学科名”的主要场景；</li>
+     *   <li>再用<b>占据查询主体</b>（长度不低于整句的 60%）的关键词匹配，支持“操作系统 进程同步”这类多词查询。</li>
+     * </ol>
+     * 过短的通用词（如“链表定义”里的“定义”）不会触发匹配，
+     * 从而避免完整问句中某个词偶然出现在资料里就产生命中。
      * </p>
      *
      * @param question 用户查询
@@ -351,17 +420,70 @@ public class RagServiceImpl implements RagService {
      * @return 匹配到的文档列表；无匹配时返回空列表
      */
     private List<Document> keywordFallbackSearch(String question, int limit) {
-        List<String> keywords = extractKeywords(question);
-        for (String keyword : keywords) {
-            String sql = "SELECT id, content FROM vector_store WHERE content ILIKE ? LIMIT ?";
-            List<Document> matched = jdbcTemplate.query(sql,
-                (rs, rowNum) -> new Document(rs.getString("id"), rs.getString("content"), Map.of()),
-                "%" + keyword + "%", limit);
+        // 候选数量放宽：同一资料常被导入多个课程，去重会消耗名额，先多取一些再截断
+        int fetch = Math.max(limit, limit * ragProperties.getRerankCandidateMultiplier());
+        String cleaned = cleanQuery(question);
+        // 第一步：整句匹配
+        if (!cleaned.isEmpty()) {
+            List<Document> whole = dedupeAndLimit(matchContent(cleaned, fetch), limit);
+            if (!whole.isEmpty()) {
+                return whole;
+            }
+        }
+        // 第二步：主体关键词匹配（关键词需覆盖整句的至少 60% 长度）
+        for (String keyword : extractKeywords(question)) {
+            if (cleaned.length() > 0 && keyword.length() * 100 < cleaned.length() * DOMINANT_KEYWORD_PERCENT) {
+                continue;
+            }
+            List<Document> matched = dedupeAndLimit(matchContent(keyword, fetch), limit);
             if (!matched.isEmpty()) {
                 return matched;
             }
         }
         return List.of();
+    }
+
+    /**
+     * 去重后截断到指定数量。
+     * <p>兜底检索同样命中同一资料在多个课程下的副本，不去重会白白占满 TopK 名额。</p>
+     *
+     * @param docs  匹配结果
+     * @param limit 最多保留的数量
+     * @return 去重且截断后的结果
+     */
+    private List<Document> dedupeAndLimit(List<Document> docs, int limit) {
+        List<Document> distinct = dedupeByContent(docs);
+        return distinct.size() > limit ? new ArrayList<>(distinct.subList(0, limit)) : distinct;
+    }
+
+    /**
+     * 按关键词做内容模糊匹配。
+     *
+     * @param keyword 匹配词
+     * @param limit   最多返回的片段数
+     * @return 命中的文档列表
+     */
+    private List<Document> matchContent(String keyword, int limit) {
+        String sql = "SELECT id, content FROM vector_store WHERE content ILIKE ? LIMIT ?";
+        return jdbcTemplate.query(sql,
+            (rs, rowNum) -> new Document(rs.getString("id"), rs.getString("content"), Map.of()),
+            "%" + keyword + "%", limit);
+    }
+
+    /**
+     * 清洗查询文本：去掉标点、常见疑问词与空白，得到用于匹配的主体文本。
+     * 与 {@link #extractKeywords(String)} 使用同一套规则，保证口径一致。
+     *
+     * @param question 用户查询
+     * @return 清洗后的查询主体
+     */
+    private String cleanQuery(String question) {
+        if (question == null) {
+            return "";
+        }
+        return question
+            .replaceAll("[^\\u4e00-\\u9fa5a-zA-Z0-9]", "")
+            .replaceAll("什么是|请问|怎么|如何|为什么|解释一下|介绍一下|的|了|吗|呢", "");
     }
 
     /**

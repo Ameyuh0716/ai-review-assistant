@@ -47,8 +47,9 @@ public class AgentController {
     @PostMapping("/chat")
     public String chat(@RequestBody @NotBlank(message = "消息内容不能为空") String message,
                        @RequestParam(required = false) Integer conversationId,
+                       @RequestParam(required = false) Integer courseId,
                        @RequestAttribute(required = false) Integer currentUserId) {
-        return agent.chat(message, conversationId, currentUserId);
+        return agent.chat(message, conversationId, currentUserId, courseId);
     }
 
     /**
@@ -58,18 +59,23 @@ public class AgentController {
      *
      * @param message          用户发送的消息内容，不能为空
      * @param conversationId   可选的会话 ID，用于多轮上下文关联
-     * @param reuseUserMessage 为 true 时不重复保存用户消息（“重新生成”场景：用户消息已存在，只重生成回复）
+     * @param reuseUserMessage 为 true 时不重复保存用户消息（内容已存在或已就地更新）
+     * @param courseId         可选的当前课程 ID，用于绑定会话课程以支撑学习统计
      * @param currentUserId    可选的当前登录用户 ID
      * @return SSE 流式文本序列
      */
     @Operation(summary = "流式对话", description = "SSE 流式返回，支持停止和重新生成")
-    @RateLimit(capacity = 30, duration = 1, unit = java.util.concurrent.TimeUnit.MINUTES, message = "对话请求过于频繁，请稍后再试。")
+    @RateLimit(capacity = 30, duration = 1, unit = java.util.concurrent.TimeUnit.MINUTES, message = "流式对话请求过于频繁，请稍后再试。")
     @GetMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<String> stream(@RequestParam("message") @NotBlank(message = "消息内容不能为空") String message,
                                @RequestParam(required = false) Integer conversationId,
                                @RequestParam(required = false) Boolean reuseUserMessage,
+                               @RequestParam(required = false) Integer courseId,
+                               @RequestParam(required = false) Integer assistantMessageId,
+                               @RequestParam(required = false) Integer historyBeforeId,
                                @RequestAttribute(required = false) Integer currentUserId) {
-        return agent.chatStream(message, conversationId, currentUserId, reuseUserMessage)
+        return agent.chatStream(message, conversationId, currentUserId, reuseUserMessage, courseId,
+                        assistantMessageId, historyBeforeId)
                 // ⚠️ 关键: SSE 规范要求客户端剥离每个 data 行后的一个前导空格
                 // 详见 {@link SseUtils#padSseLines(String)}
                 .map(SseUtils::padSseLines);

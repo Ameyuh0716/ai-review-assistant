@@ -1,6 +1,9 @@
 package com.aiservice.aireviewassistant.service.impl;
 
 import com.aiservice.aireviewassistant.dto.KnowledgeChunkDto;
+import com.aiservice.aireviewassistant.dto.KnowledgeDocumentDto;
+import com.aiservice.aireviewassistant.entity.KnowledgeDocument;
+import com.aiservice.aireviewassistant.mapper.KnowledgeDocumentMapper;
 import com.aiservice.aireviewassistant.service.CoursesService;
 import com.aiservice.aireviewassistant.service.DocumentService;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -17,6 +20,7 @@ import java.nio.charset.CharacterCodingException;
 import java.nio.charset.Charset;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -44,10 +48,14 @@ public class DocumentServiceImpl implements DocumentService {
     /** 单个分块的目标最大字符数 */
     private static final int MAX_CHUNK_LENGTH = 500;
 
+    /** 历史分块（无文件名元数据）在知识库管理页的兜底资料名称 */
+    private static final String FALLBACK_DOC_NAME = "历史导入资料";
+
     private final VectorStore vectorStore;
     private final CoursesService coursesService;
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
+    private final KnowledgeDocumentMapper knowledgeDocumentMapper;
 
     /**
      * 构造方法：注入向量库、课程服务、JdbcTemplate 与 JSON 工具。
@@ -56,15 +64,18 @@ public class DocumentServiceImpl implements DocumentService {
      * @param coursesService 课程服务，用于校验课程 ID 合法性
      * @param jdbcTemplate   JDBC 模板，用于直接操作 vector_store 表
      * @param objectMapper   JSON 解析工具，用于解析 metadata
+     * @param knowledgeDocumentMapper 原始资料 Mapper，用于保存/读取完整原文
      */
     public DocumentServiceImpl(VectorStore vectorStore,
                                CoursesService coursesService,
                                JdbcTemplate jdbcTemplate,
-                               ObjectMapper objectMapper) {
+                               ObjectMapper objectMapper,
+                               KnowledgeDocumentMapper knowledgeDocumentMapper) {
         this.vectorStore = vectorStore;
         this.coursesService = coursesService;
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
+        this.knowledgeDocumentMapper = knowledgeDocumentMapper;
     }
 
     /**
@@ -92,8 +103,22 @@ public class DocumentServiceImpl implements DocumentService {
             return "错误：读取文件失败 - " + e.getMessage();
         }
 
-        // 复用文本导入逻辑完成分块与向量化
-        return importContent(courseId, content);
+        // 复用文本导入逻辑完成分块与向量化；携带文件名以便知识库按资料分组展示
+        return importContent(courseId, content, extractBaseName(file.getOriginalFilename()));
+    }
+
+    /**
+     * 从上传文件名中提取纯文件名（去除路径前缀）。
+     *
+     * @param originalFilename 原始文件名，可能包含完整路径
+     * @return 去除路径后的文件名；入参为空时返回 null
+     */
+    private String extractBaseName(String originalFilename) {
+        if (originalFilename == null || originalFilename.isBlank()) {
+            return null;
+        }
+        int slash = Math.max(originalFilename.lastIndexOf('/'), originalFilename.lastIndexOf('\\'));
+        return (slash >= 0 ? originalFilename.substring(slash + 1) : originalFilename).trim();
     }
 
     /**
@@ -105,6 +130,25 @@ public class DocumentServiceImpl implements DocumentService {
      */
     @Override
     public String importContent(Integer courseId, String content) {
+        // 未指定文件名时，用带时间戳的默认名称，保证多次导入可区分
+        String defaultName = "手动导入文本 " + java.time.LocalDateTime.now()
+            .format(java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm"));
+        return importContent(courseId, content, defaultName);
+    }
+
+    /**
+     * 直接导入文本内容（可指定资料名称），分块、向量化后存入向量库。
+     * <p>
+     * 向量化成功后会把完整原文写入 {@code knowledge_document} 表，供知识库页"查看完整源文件预览"。
+     * </p>
+     *
+     * @param courseId 课程 ID
+     * @param content  原始文本内容
+     * @param fileName 资料名称（写入分块元数据与原文表，供知识库按资料分组展示）
+     * @return 处理结果描述
+     */
+    @Override
+    public String importContent(Integer courseId, String content, String fileName) {
         // 按段落对文档进行分块
         List<String> chunks = splitDocument(content);
 
@@ -112,7 +156,7 @@ public class DocumentServiceImpl implements DocumentService {
             return "错误：文档内容为空或无法分块";
         }
 
-        // 批量构建 Spring AI Document，并附加课程与分片元数据
+        // 批量构建 Spring AI Document，并附加课程、文件与分片元数据
         // 已有分块数用于续接序号，支持对同一课程多次导入而不产生序号冲突
         int baseIndex = (int) countChunks(courseId);
         List<Document> documents = new ArrayList<>();
@@ -120,6 +164,9 @@ public class DocumentServiceImpl implements DocumentService {
             String chunk = chunks.get(i);
             Map<String, Object> metadata = new HashMap<>();
             metadata.put("courseId", courseId);
+            if (fileName != null && !fileName.isBlank()) {
+                metadata.put("fileName", fileName);
+            }
             metadata.put("chunkIndex", baseIndex + i);
             metadata.put("chunkTotal", baseIndex + chunks.size());
             documents.add(new Document(chunk, metadata));
@@ -128,10 +175,40 @@ public class DocumentServiceImpl implements DocumentService {
         try {
             // 调用向量库批量写入：内部会自动完成文本向量化与持久化
             vectorStore.add(documents);
-            return "成功：文档已分块并向量化，共处理 " + chunks.size() + " 块";
         } catch (Exception e) {
             log.error("文档向量化失败: {}", e.getMessage(), e);
             return "错误：文档向量化失败 - " + e.getMessage();
+        }
+
+        // 向量化成功后保存完整原文，用于知识库“预览源文件”
+        saveOriginalDocument(courseId, fileName, content, chunks.size());
+        return "成功：文档已分块并向量化，共处理 " + chunks.size() + " 块";
+    }
+
+    /**
+     * 保存资料的完整原文。
+     * <p>写入失败仅记录警告，不影响向量化结果与上传流程。</p>
+     *
+     * @param courseId   课程 ID
+     * @param fileName   资料名称
+     * @param content    解析后的完整文本
+     * @param chunkCount 分块数量
+     */
+    private void saveOriginalDocument(Integer courseId, String fileName, String content, int chunkCount) {
+        if (fileName == null || fileName.isBlank()) {
+            return;
+        }
+        try {
+            KnowledgeDocument doc = new KnowledgeDocument();
+            doc.setCourseId(courseId);
+            doc.setFileName(fileName);
+            doc.setContent(content);
+            doc.setChunkCount(chunkCount);
+            doc.setCreatedAt(LocalDateTime.now());
+            knowledgeDocumentMapper.insert(doc);
+        } catch (Exception e) {
+            log.warn("保存资料原文失败（不影响检索）: courseId={}, fileName={}, err={}",
+                courseId, fileName, e.getMessage());
         }
     }
 
@@ -359,6 +436,93 @@ public class DocumentServiceImpl implements DocumentService {
     }
 
     /**
+     * 查询课程下的资料列表（按上传文件聚合）。
+     * <p>
+     * 以分块元数据中的 {@code fileName} 分组：同一文件的多个分块合并为一份资料，
+     * 资料内分块按 chunkIndex 升序；无文件名元数据的历史分块归入「历史导入资料」。
+     * 若该资料已保存完整原文（{@code knowledge_document}），一并返回资料 ID 与原文标记。
+     * </p>
+     *
+     * @param courseId 课程 ID
+     * @return 资料列表（按首次出现的顺序）
+     */
+    @Override
+    public List<KnowledgeDocumentDto> listDocuments(Integer courseId) {
+        // 已保存的完整原文：fileName -> 最新一条记录
+        Map<String, KnowledgeDocument> originals = new java.util.LinkedHashMap<>();
+        for (KnowledgeDocument doc : knowledgeDocumentMapper.selectList(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<KnowledgeDocument>()
+                    .eq(KnowledgeDocument::getCourseId, courseId)
+                    .orderByAsc(KnowledgeDocument::getId))) {
+            // 同名资料重复上传时保留最新一条（后写覆盖前写）
+            originals.put(doc.getFileName(), doc);
+        }
+
+        // 复用全量分块查询：单课程分块上限 50，可一次性返回并按资料分组
+        List<KnowledgeChunkDto> chunks = listChunks(courseId);
+        Map<String, List<KnowledgeChunkDto>> grouped = new java.util.LinkedHashMap<>();
+        for (KnowledgeChunkDto chunk : chunks) {
+            String name = chunk.getFileName() != null && !chunk.getFileName().isBlank()
+                ? chunk.getFileName() : FALLBACK_DOC_NAME;
+            grouped.computeIfAbsent(name, k -> new ArrayList<>()).add(chunk);
+        }
+
+        List<KnowledgeDocumentDto> documents = new ArrayList<>();
+        grouped.forEach((name, list) -> {
+            KnowledgeDocument original = originals.get(name);
+            documents.add(new KnowledgeDocumentDto(
+                original != null ? original.getId() : null,
+                name,
+                list.size(),
+                original != null,
+                list
+            ));
+        });
+        return documents;
+    }
+
+    /**
+     * 查询某份资料的完整原文。
+     * <p>
+     * 优先读取 {@code knowledge_document} 中保存的原文；历史资料（未保存原文）则回退为
+     * 将其全部分块按顺序拼接，保证任何资料都能预览到完整内容。
+     * </p>
+     *
+     * @param courseId 课程 ID
+     * @param fileName 资料名称
+     * @return 完整原文；资料不存在时返回 null
+     */
+    @Override
+    public String getDocumentContent(Integer courseId, String fileName) {
+        if (fileName == null || fileName.isBlank()) {
+            return null;
+        }
+        KnowledgeDocument original = knowledgeDocumentMapper.selectOne(
+            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<KnowledgeDocument>()
+                .eq(KnowledgeDocument::getCourseId, courseId)
+                .eq(KnowledgeDocument::getFileName, fileName)
+                .orderByDesc(KnowledgeDocument::getId)
+                .last("LIMIT 1"));
+        if (original != null && original.getContent() != null) {
+            return original.getContent();
+        }
+        // 历史数据回退：按分块顺序拼接为完整文本
+        StringBuilder sb = new StringBuilder();
+        for (KnowledgeChunkDto chunk : listChunks(courseId)) {
+            String name = chunk.getFileName() != null && !chunk.getFileName().isBlank()
+                ? chunk.getFileName() : FALLBACK_DOC_NAME;
+            if (!name.equals(fileName)) {
+                continue;
+            }
+            if (sb.length() > 0) {
+                sb.append("\n\n");
+            }
+            sb.append(chunk.getContent());
+        }
+        return sb.length() > 0 ? sb.toString() : null;
+    }
+
+    /**
      * 统计课程下的向量分块数量。
      *
      * @param courseId 课程 ID
@@ -372,19 +536,27 @@ public class DocumentServiceImpl implements DocumentService {
     }
 
     /**
-     * 删除课程下的所有向量分块。
+     * 删除课程下的所有向量分块，同时清理已保存的资料原文。
      *
      * @param courseId 课程 ID
-     * @return 受影响的行数
+     * @return 受影响的分块行数
      */
     @Override
     public int deleteChunksByCourseId(Integer courseId) {
+        // 一并删除原文记录，避免清空知识库后“预览原文”仍能打开
+        try {
+            knowledgeDocumentMapper.delete(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<KnowledgeDocument>()
+                    .eq(KnowledgeDocument::getCourseId, courseId));
+        } catch (Exception e) {
+            log.warn("删除资料原文失败: courseId={}, err={}", courseId, e.getMessage());
+        }
         String sql = "DELETE FROM vector_store WHERE metadata->>'courseId' = ?";
         return jdbcTemplate.update(sql, String.valueOf(courseId));
     }
 
     /**
-     * 解析 metadata JSON，将 courseId、chunkIndex、chunkTotal 填充到 DTO。
+     * 解析 metadata JSON，将 courseId、fileName、chunkIndex、chunkTotal 填充到 DTO。
      *
      * @param dto          知识分块 DTO
      * @param metadataJson metadata 原始 JSON 字符串
@@ -394,6 +566,9 @@ public class DocumentServiceImpl implements DocumentService {
             JsonNode node = objectMapper.readTree(metadataJson);
             if (node.has("courseId")) {
                 dto.setCourseId(node.get("courseId").asInt());
+            }
+            if (node.hasNonNull("fileName")) {
+                dto.setFileName(node.get("fileName").asText());
             }
             if (node.has("chunkIndex")) {
                 dto.setChunkIndex(node.get("chunkIndex").asInt());

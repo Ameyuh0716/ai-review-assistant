@@ -140,6 +140,19 @@ CREATE TABLE IF NOT EXISTS study_plan (
 CREATE INDEX IF NOT EXISTS idx_study_plan_user ON study_plan(user_id);
 CREATE INDEX IF NOT EXISTS idx_study_plan_created_at ON study_plan(created_at);
 
+-- 创建知识库原始资料表（保存上传文件的完整解析文本，用于“查看完整源文件预览”）
+CREATE TABLE IF NOT EXISTS knowledge_document (
+    id SERIAL PRIMARY KEY,
+    course_id INTEGER NOT NULL,
+    file_name VARCHAR(255) NOT NULL,
+    content TEXT NOT NULL,
+    chunk_count INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_document_course ON knowledge_document(course_id);
+CREATE INDEX IF NOT EXISTS idx_knowledge_document_course_name ON knowledge_document(course_id, file_name);
+
 -- 自动更新 updated_at 的触发器
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
