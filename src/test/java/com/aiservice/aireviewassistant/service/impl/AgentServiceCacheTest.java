@@ -1,10 +1,13 @@
 package com.aiservice.aireviewassistant.service.impl;
 
 import com.aiservice.aireviewassistant.config.PromptTemplate;
+import com.aiservice.aireviewassistant.entity.Courses;
+import com.aiservice.aireviewassistant.service.CoursesService;
 import com.aiservice.aireviewassistant.service.PlanService;
 import com.aiservice.aireviewassistant.service.QuizService;
 import com.aiservice.aireviewassistant.service.RagService;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -18,14 +21,15 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Agent 服务缓存测试。
- * <p>验证 {@link QuizService}、{@link PlanService}、{@link RagService} 基于 Caffeine 的缓存行为，
- * 确保相同输入不会触发重复的底层 LLM 调用。</p>
+ * Agent 服务缓存与知识库隔离测试。
+ * <p>一部分验证 {@link QuizService}、{@link PlanService} 的 Caffeine 缓存行为；
+ * 另一部分验证 {@link RagService} 的多用户知识库隔离（检索范围限定）。</p>
  */
 @ActiveProfiles("test")
 @SpringBootTest
@@ -56,6 +60,14 @@ class AgentServiceCacheTest {
 
     @MockBean
     private org.springframework.ai.vectorstore.VectorStore vectorStore;
+
+    /**
+     * 课程服务 mock。
+     * <p>知识库检索需要用它把「用户」换算为「可见课程」，
+     * 因此隔离测试必须能控制课程归属（包括“课程属于别人”这种越权场景）。</p>
+     */
+    @MockBean
+    private CoursesService coursesService;
 
     @MockBean
     private ChatClient.ChatClientRequestSpec requestSpec;
@@ -131,45 +143,61 @@ class AgentServiceCacheTest {
     }
 
     /**
-     * 测试场景：连续两次向 RAG 问答服务提出相同问题。
-     * <p>准备条件：向量库未检索到相关文档，LLM 固定返回相同答案。</p>
-     * <p>断言意图：两次返回结果一致，且 {@code chatClient.prompt()} 仅被调用一次。</p>
+     * 测试场景：用户指定了一个<b>属于自己的</b>课程，然后在对话中提问。
+     * <p>准备条件：向量库检索无结果。</p>
+     * <p>断言意图：检索必须带上课程过滤条件，把搜索范围限制在该课程内。</p>
      */
     @Test
-    void shouldCacheRagResult() {
-        stubChatClient("RAG回答");
-        // 模拟向量相似性搜索未返回任何文档
+    void shouldScopeRagSearchToSpecifiedCourse() {
+        stubChatClient("课程回答");
+        Courses course = new Courses();
+        course.setId(100);
+        course.setUserId(7);
+        when(coursesService.getById(100)).thenReturn(course);
         when(vectorStore.similaritySearch(any(SearchRequest.class))).thenReturn(List.of());
 
-        // 第一次问答
-        String first = ragService.answerQuestion("什么是索引？", 1);
-        // 第二次相同问题应命中缓存
-        String second = ragService.answerQuestion("什么是索引？", 1);
+        ragService.answerQuestion("什么是索引", 1, RagService.RagScope.of(7, 100));
 
-        // 验证缓存命中后两次结果相同
-        assertThat(first).isEqualTo(second);
-        // 验证 LLM 调用次数为 1
-        verify(chatClient, times(1)).prompt();
+        ArgumentCaptor<SearchRequest> captor = ArgumentCaptor.forClass(SearchRequest.class);
+        verify(vectorStore).similaritySearch(captor.capture());
+        // 过滤表达式限定为 courseId == 100，避免搜到其它课程的资料
+        assertThat(captor.getValue().getFilterExpression()).isNotNull();
+        assertThat(captor.getValue().getFilterExpression().toString()).contains("courseId")
+            .contains("100");
     }
 
     /**
-     * 测试场景：验证同步 RAG 问答接口对相同问题的缓存效果。
-     * <p>准备条件：当前流式接口直接调用 LLM、不使用缓存，因此本方法仅覆盖同步模式。</p>
-     * <p>断言意图：两次同步调用返回相同结果，且底层 LLM 调用仅发生一次。</p>
+     * 测试场景：用户 A 伪造了用户 B 的 courseId 发起提问。
+     * <p>准备条件：该课程确实存在于库中，但归属于另一个用户。</p>
+     * <p>断言意图：拒绝检索（不访问向量库），防止越权读取他人知识库。</p>
      */
     @Test
-    void shouldReturnCachedStream() {
-        // 当前流式模式直接调用 LLM，不再使用缓存；本方法验证同步模式仍走缓存
-        stubChatClient("流式回答");
+    void shouldRejectCourseNotOwnedByUser() {
+        stubChatClient("通用回答");
+        Courses othersCourse = new Courses();
+        othersCourse.setId(100);
+        othersCourse.setUserId(999);   // 属于别的用户
+        when(coursesService.getById(100)).thenReturn(othersCourse);
 
-        // 第一次同步问答
-        String syncResult = ragService.answerQuestion("问题", 1);
-        // 第二次相同问题应命中缓存
-        String syncResult2 = ragService.answerQuestion("问题", 1);
+        String answer = ragService.answerQuestion("什么是索引", 1, RagService.RagScope.of(7, 100));
 
-        // 验证两次同步结果一致
-        assertThat(syncResult).isEqualTo(syncResult2);
-        // 缓存命中，chatClient.prompt() 仅被调用一次
-        verify(chatClient, times(1)).prompt();
+        assertThat(answer).isEqualTo("通用回答");
+        verify(vectorStore, never()).similaritySearch(any(SearchRequest.class));
+    }
+
+    /**
+     * 测试场景：匿名用户（未登录）提问。
+     * <p>准备条件：向量库中存在其它用户的资料分块。</p>
+     * <p>断言意图：匿名用户没有任何可见课程，不应触碰向量库——
+     * 这正是「我没添加知识库却命中别人资料」的修复点。</p>
+     */
+    @Test
+    void shouldNotSearchForAnonymousUser() {
+        stubChatClient("通用回答");
+
+        String answer = ragService.answerQuestion("数据库的索引讲一下", 1, RagService.RagScope.NONE);
+
+        assertThat(answer).isEqualTo("通用回答");
+        verify(vectorStore, never()).similaritySearch(any(SearchRequest.class));
     }
 }

@@ -42,14 +42,14 @@ class QuestionToolTest {
         // 构造工具上下文：用户问题为“什么是索引？”，课程 ID 为 100
         ToolContext context = new ToolContext("什么是索引？", 100, null, null);
         // 模拟 RagService 对应该问题的返回结果
-        when(ragService.answerQuestion("什么是索引？", 100)).thenReturn("索引是...");
+        when(ragService.answerQuestion("什么是索引？", 100, RagService.RagScope.NONE)).thenReturn("索引是...");
 
         String result = questionTool.execute(context);
 
         // 断言返回结果与模拟值一致
         assertThat(result).isEqualTo("索引是...");
         // 验证 RagService.answerQuestion 被以期望参数调用过一次
-        verify(ragService).answerQuestion("什么是索引？", 100);
+        verify(ragService).answerQuestion("什么是索引？", 100, RagService.RagScope.NONE);
     }
 
     /**
@@ -62,7 +62,7 @@ class QuestionToolTest {
         ToolContext context = new ToolContext("解释范式", 200, null, null);
         // 模拟检索元数据与答案流
         RagService.RagMeta meta = new RagService.RagMeta(1, 1, 3, 0.5, 12L, false, 0.81);
-        when(ragService.answerQuestionStreamWithMeta("解释范式", 200))
+        when(ragService.answerQuestionStreamWithMeta("解释范式", 200, RagService.RagScope.NONE))
             .thenReturn(new RagService.RagAnswer(meta, Flux.just("范", "式")));
 
         Flux<String> result = questionTool.stream(context);

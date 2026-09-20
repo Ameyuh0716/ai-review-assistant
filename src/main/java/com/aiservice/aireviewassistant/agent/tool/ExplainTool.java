@@ -79,7 +79,8 @@ public class ExplainTool implements AgentTool {
     @Override
     public String execute(ToolContext context) {
         String concept = extractConcept(context);
-        String retrievedContext = ragService.retrieveContext(concept, context.getConversationId());
+        String retrievedContext = ragService.retrieveContext(concept, context.getConversationId(),
+            RagService.RagScope.of(context.getUserId(), context.getCourseId()));
         String systemPrompt = promptTemplate.render("explain-system.txt",
             Map.of("concept", concept, "context", retrievedContext));
         return chatClient.prompt()
@@ -99,7 +100,9 @@ public class ExplainTool implements AgentTool {
     @Override
     public Flux<String> stream(ToolContext context) {
         String concept = extractConcept(context);
-        RagService.RagContext ragContext = ragService.retrieveContextWithMeta(concept, context.getConversationId());
+        RagService.RagContext ragContext = ragService.retrieveContextWithMeta(concept,
+            context.getConversationId(),
+            RagService.RagScope.of(context.getUserId(), context.getCourseId()));
         String systemPrompt = promptTemplate.render("explain-system.txt",
             Map.of("concept", concept, "context", ragContext.context()));
         return Flux.concat(

@@ -65,7 +65,7 @@ class SummaryToolTest {
         // 构造工具上下文：parameters 中显式指定 topic 为“数据库索引”，课程 ID 为 1
         ToolContext context = new ToolContext("随便", 1, Map.of("topic", "数据库索引"), null);
         // 模拟 RagService 根据显式主题检索上下文
-        when(ragService.retrieveContext("数据库索引", 1)).thenReturn("索引相关内容");
+        when(ragService.retrieveContext("数据库索引", 1, RagService.RagScope.NONE)).thenReturn("索引相关内容");
         // 模拟提示词模板渲染结果
         when(promptTemplate.render(anyString(), any(Map.class))).thenReturn("系统提示");
         // 配置 ChatClient 同步调用链：prompt -> system -> user -> call -> content
@@ -80,7 +80,7 @@ class SummaryToolTest {
         // 断言返回结果与 ChatClient 返回的总结一致
         assertThat(result).isEqualTo("总结结果");
         // 验证 RagService 以显式主题和课程 ID 检索上下文
-        verify(ragService).retrieveContext("数据库索引", 1);
+        verify(ragService).retrieveContext("数据库索引", 1, RagService.RagScope.NONE);
     }
 
     /**
@@ -92,7 +92,7 @@ class SummaryToolTest {
     void shouldExtractTopicFromMessage() {
         ToolContext context = new ToolContext("帮我总结数据库范式", 2, null, null);
         // 模拟 RagService 对任意主题检索返回固定上下文
-        when(ragService.retrieveContext(anyString(), any())).thenReturn("范式相关内容");
+        when(ragService.retrieveContext(anyString(), any(), any())).thenReturn("范式相关内容");
         // 模拟提示词模板渲染结果
         when(promptTemplate.render(anyString(), any(Map.class))).thenReturn("系统提示");
         // 配置 ChatClient 同步调用链
@@ -119,7 +119,7 @@ class SummaryToolTest {
         ToolContext context = new ToolContext("总结索引", 3, Map.of("topic", "索引"), null);
         // 模拟 RagService 检索上下文与元数据
         RagService.RagMeta meta = new RagService.RagMeta(1, 1, 3, 0.5, 10L, false, 0.7);
-        when(ragService.retrieveContextWithMeta(anyString(), any()))
+        when(ragService.retrieveContextWithMeta(anyString(), any(), any()))
             .thenReturn(new RagService.RagContext(meta, "上下文"));
         // 模拟提示词模板渲染结果
         when(promptTemplate.render(anyString(), any(Map.class))).thenReturn("提示");

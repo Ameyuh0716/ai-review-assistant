@@ -365,7 +365,8 @@ public class StudyPlanServiceImpl extends ServiceImpl<StudyPlanMapper, StudyPlan
         }
 
         // 复习内容 / 掌握内容：检索知识库上下文后流式生成
-        String context = ragService.retrieveContext(topic, null);
+        // 限定在「该用户自己的课程」范围内检索，与其他用户的知识库隔离
+        String context = ragService.retrieveContext(topic, null, RagService.RagScope.ofUser(userId));
         String template = "review".equals(sec) ? "plan-day-review.txt" : "plan-day-mastery.txt";
         String systemPrompt = promptTemplate.render(template, Map.of(
             "course", plan.getCourseName() == null ? "" : plan.getCourseName(),

@@ -288,7 +288,8 @@ public class ReviewAssistantAgent {
                 tool = toolRegistry.getTool("CHAT");
             }
 
-            ToolContext context = new ToolContext(userMessage, convId, params, history);
+            ToolContext context = new ToolContext(userMessage, convId, params, history,
+                userId, conversation != null ? conversation.getCourseId() : null);
 
             // 工具参数校验
             if (!tool.validate(context)) {
@@ -539,7 +540,10 @@ public class ReviewAssistantAgent {
                 tool = toolRegistry.getTool("CHAT");
             }
 
-            ToolContext context = new ToolContext(userMessage, convId, params, history);
+            // 传入用户与会话课程：工具据此把知识库检索限定在“该用户自己的课程”内，
+            // 避免匿名或跨用户命中别人的资料。课程取会话上解析出的值（含 [课程: xxx] 前缀解析结果）。
+            ToolContext context = new ToolContext(userMessage, convId, params, history,
+                userId, conversation != null ? conversation.getCourseId() : null);
 
             // 工具参数校验，失败时直接返回错误提示
             if (!tool.validate(context)) {

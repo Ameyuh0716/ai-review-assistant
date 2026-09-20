@@ -66,9 +66,15 @@ public class SecurityConfig {
                 .requestMatchers("/actuator/health").permitAll()
                 // 需要 ADMIN 角色
                 .requestMatchers("/actuator/**").hasRole("ADMIN")
-                // 对话接口允许匿名（登录后自动关联用户）
-                .requestMatchers("/api/agent/**", "/api/conversations/**", "/api/messages").permitAll()
+                // 会话清理会跨用户删除长期不活跃会话，属运维操作，仅 ADMIN 可调用
+                .requestMatchers("/api/conversations/cleanup").hasRole("ADMIN")
+                // 仅 Agent 对话接口允许匿名（未登录也能体验能力，会话记为 anonymous）
+                .requestMatchers("/api/agent/**").permitAll()
                 // 默认：所有其他请求需要认证
+                // ⚠️ /api/conversations/** 与 /api/messages/** 属于用户私有数据，**不再放行**：
+                // 历史配置曾将其 permitAll，加之 Controller 未校验归属，导致匿名请求可读取
+                // 全库会话列表与他人会话的完整消息内容。现在未认证会在这一层被拦下（401），
+                // Controller 层另有 ConversationAccessGuard 做归属校验（纵深防御）。
                 .anyRequest().authenticated()
             )
             // 未认证统一返回 401（而非默认 403），前端据此触发 Token 刷新流程

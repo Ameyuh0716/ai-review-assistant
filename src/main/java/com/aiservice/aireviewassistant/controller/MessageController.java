@@ -3,6 +3,7 @@ package com.aiservice.aireviewassistant.controller;
 import com.aiservice.aireviewassistant.common.ApiResponse;
 import com.aiservice.aireviewassistant.entity.Conversation;
 import com.aiservice.aireviewassistant.entity.Message;
+import com.aiservice.aireviewassistant.security.ConversationAccessGuard;
 import com.aiservice.aireviewassistant.service.ConversationService;
 import com.aiservice.aireviewassistant.service.MessageService;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
@@ -13,7 +14,8 @@ import java.util.List;
 import java.util.Map;
 /**
  * 消息控制器。
- * <p>负责查询会话中的历史消息，以及外部手动补充消息。</p>
+ * <p>负责查询会话中的历史消息，以及外部手动补充消息。
+ * <b>所有接口都会校验消息所属会话的归属</b>，防止越权读取或篡改他人对话。</p>
  */
 @Slf4j
 @RestController
@@ -23,27 +25,42 @@ public class MessageController {
     private final MessageService messageService;
     private final ConversationService conversationService;
 
+    /** 会话归属守卫：消息没有自己的 user_id，归属一律由所属会话決定。 */
+    private final ConversationAccessGuard accessGuard;
+
     /**
-     * 构造方法，注入消息服务与会话服务。
+     * 构造方法，注入消息服务、会话服务与归属守卫。
      *
      * @param messageService      消息 CRUD 服务
      * @param conversationService 会话 CRUD 服务（用于编辑首条消息时同步标题）
+     * @param accessGuard         会话归属守卫，用于对象级授权校验
      */
-    public MessageController(MessageService messageService, ConversationService conversationService) {
+    public MessageController(MessageService messageService, ConversationService conversationService,
+                             ConversationAccessGuard accessGuard) {
         this.messageService = messageService;
         this.conversationService = conversationService;
+        this.accessGuard = accessGuard;
     }
 
     /**
      * 根据会话 ID 查询消息历史。
      * <p>HTTP: {@code GET /api/messages?conversationId=1}</p>
      * <p>按创建时间升序返回，保证对话时间线正确。</p>
+     * <p>
+     * <b>修复说明：</b>历史实现仅按 conversationId 过滤、不校验归属，
+     * 导致任何请求都能读取他人会话的<b>完整对话内容</b>（含 AI 回答全文）。
+     * </p>
      *
      * @param conversationId 会话 ID
-     * @return 该会话下的消息列表
+     * @param currentUserId  当前登录用户 ID
+     * @return 该会话下的消息列表；越权或未登录时返回 403
      */
     @GetMapping
-    public ApiResponse<List<Message>> listByConversation(@RequestParam Integer conversationId) {
+    public ApiResponse<List<Message>> listByConversation(@RequestParam Integer conversationId,
+                                                         @RequestAttribute(required = false) Integer currentUserId) {
+        if (!accessGuard.canAccessConversation(conversationId, currentUserId)) {
+            return ApiResponse.error(403, "无权访问该会话的消息");
+        }
         QueryWrapper<Message> wrapper = new QueryWrapper<>();
         wrapper.eq("conversation_id", conversationId);
         wrapper.orderByAsc("created_at");
@@ -61,10 +78,15 @@ public class MessageController {
      * @return 更新后的消息；消息不存在或内容为空时返回 code 非 0
      */
     @PutMapping("/{id}")
-    public ApiResponse<Message> update(@PathVariable Integer id, @RequestBody Map<String, String> body) {
+    public ApiResponse<Message> update(@PathVariable Integer id, @RequestBody Map<String, String> body,
+                                       @RequestAttribute(required = false) Integer currentUserId) {
         Message message = messageService.getById(id);
         if (message == null) {
             return new ApiResponse<>(1, "消息不存在", null);
+        }
+        // 归属校验：消息没有独立 user_id，一律以其所属会话的归属为准
+        if (!accessGuard.canAccessConversation(message.getConversationId(), currentUserId)) {
+            return ApiResponse.error(403, "无权修改该消息");
         }
         String content = body != null ? body.get("content") : null;
         if (content == null || content.trim().isEmpty()) {
@@ -137,13 +159,19 @@ public class MessageController {
     /**
      * 新增一条消息。
      * <p>HTTP: {@code POST /api/messages}</p>
-     * <p>通常由 Agent 内部调用，也可由外部手动补充历史消息。</p>
+     * <p>通常由 Agent 内部调用，也可由外部手动补充历史消息；
+     * 仅允许向自己名下的会话写入，防止往他人会话塞入内容。</p>
      *
-     * @param message 待保存的消息对象
-     * @return 是否保存成功
+     * @param message       待保存的消息对象
+     * @param currentUserId 当前登录用户 ID
+     * @return 是否保存成功；越权或未登录时返回 403
      */
     @PostMapping
-    public ApiResponse<Boolean> save(@RequestBody Message message) {
+    public ApiResponse<Boolean> save(@RequestBody Message message,
+                                     @RequestAttribute(required = false) Integer currentUserId) {
+        if (!accessGuard.canAccessConversation(message.getConversationId(), currentUserId)) {
+            return ApiResponse.error(403, "无权向该会话写入消息");
+        }
         return ApiResponse.success(messageService.save(message));
     }
 
@@ -152,15 +180,21 @@ public class MessageController {
      * <p>HTTP: {@code DELETE /api/messages/{id}/truncate}</p>
      * <p>用于对话的“编辑并重新发送”与“重新生成”功能：先移除目标位置及其后的消息，
      * 再由前端重新发起流式对话。消息不存在时返回 false（幂等）。</p>
+     * <p><b>注意：</b>本接口是破坏性操作（会删除多条消息），因此必须先校验归属。</p>
      *
-     * @param id 起始消息 ID（包含该条）
-     * @return 是否有消息被删除
+     * @param id            起始消息 ID（包含该条）
+     * @param currentUserId 当前登录用户 ID
+     * @return 是否有消息被删除；越权或未登录时返回 403
      */
     @DeleteMapping("/{id}/truncate")
-    public ApiResponse<Boolean> truncate(@PathVariable Integer id) {
+    public ApiResponse<Boolean> truncate(@PathVariable Integer id,
+                                         @RequestAttribute(required = false) Integer currentUserId) {
         Message message = messageService.getById(id);
         if (message == null) {
             return ApiResponse.success(false);
+        }
+        if (!accessGuard.canAccessConversation(message.getConversationId(), currentUserId)) {
+            return ApiResponse.error(403, "无权删除该会话的消息");
         }
         // 同一会话内删除 id >= 起始消息的全部消息，保持多个会话互不影响
         QueryWrapper<Message> wrapper = new QueryWrapper<>();

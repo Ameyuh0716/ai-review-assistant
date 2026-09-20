@@ -3,6 +3,7 @@ package com.aiservice.aireviewassistant.controller;
 import com.aiservice.aireviewassistant.common.ApiResponse;
 import com.aiservice.aireviewassistant.dto.KnowledgeChunkDto;
 import com.aiservice.aireviewassistant.dto.KnowledgeDocumentDto;
+import com.aiservice.aireviewassistant.security.CourseAccessGuard;
 import com.aiservice.aireviewassistant.service.DocumentService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -15,6 +16,8 @@ import java.util.Map;
 /**
  * 知识库管理控制器。
  * <p>负责管理课程下的向量知识分块，包括分页查询、数量统计与批量删除。</p>
+ * <p><b>安全边界：</b>所有接口都先经过 {@link CourseAccessGuard} 校验课程归属，
+ * 防止用户通过猜测 courseId 读写他人课程的知识库。</p>
  */
 @Tag(name = "知识库管理", description = "查看、统计、删除课程下的向量分块")
 @RestController
@@ -22,14 +25,28 @@ import java.util.Map;
 public class KnowledgeBaseController {
 
     private final DocumentService documentService;
+    private final CourseAccessGuard accessGuard;
 
     /**
-     * 构造方法，注入文档服务。
+     * 构造方法，注入文档服务与课程访问守卫。
      *
      * @param documentService 文档处理服务，同时提供知识块查询与删除能力
+     * @param accessGuard     课程归属校验组件
      */
-    public KnowledgeBaseController(DocumentService documentService) {
+    public KnowledgeBaseController(DocumentService documentService, CourseAccessGuard accessGuard) {
         this.documentService = documentService;
+        this.accessGuard = accessGuard;
+    }
+
+    /**
+     * 越权时的统一响应。
+     * <p>对“课程不存在”与“课程不属于当前用户”返回相同结果，避免探测他人课程。</p>
+     *
+     * @param courseId 目标课程 ID
+     * @return 403 错误响应
+     */
+    private <T> ApiResponse<T> forbidden(Integer courseId) {
+        return ApiResponse.error(403, "无权访问该课程的知识库（courseId=" + courseId + "）");
     }
 
     /**
@@ -47,7 +64,11 @@ public class KnowledgeBaseController {
     public ApiResponse<Map<String, Object>> listChunks(
             @PathVariable Integer courseId,
             @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "20") int pageSize) {
+            @RequestParam(defaultValue = "20") int pageSize,
+            @RequestAttribute(required = false) Integer currentUserId) {
+        if (!accessGuard.canAccess(courseId, currentUserId)) {
+            return forbidden(courseId);
+        }
         // 分页参数保护：单页最多返回 100 条，避免前端传入过大值
         pageSize = Math.min(pageSize, 100);
         List<KnowledgeChunkDto> chunks = documentService.listChunks(courseId, page, pageSize);
@@ -73,7 +94,11 @@ public class KnowledgeBaseController {
      */
     @Operation(summary = "查询课程下的资料列表（按资料聚合分块）")
     @GetMapping("/{courseId}/documents")
-    public ApiResponse<Map<String, Object>> listDocuments(@PathVariable Integer courseId) {
+    public ApiResponse<Map<String, Object>> listDocuments(@PathVariable Integer courseId,
+                                                          @RequestAttribute(required = false) Integer currentUserId) {
+        if (!accessGuard.canAccess(courseId, currentUserId)) {
+            return forbidden(courseId);
+        }
         List<KnowledgeDocumentDto> documents = documentService.listDocuments(courseId);
         Map<String, Object> result = new HashMap<>();
         result.put("documents", documents);
@@ -94,7 +119,11 @@ public class KnowledgeBaseController {
     @Operation(summary = "查询资料完整原文")
     @GetMapping("/{courseId}/document-content")
     public ApiResponse<Map<String, Object>> documentContent(@PathVariable Integer courseId,
-                                                            @RequestParam("name") String name) {
+                                                            @RequestParam("name") String name,
+                                                            @RequestAttribute(required = false) Integer currentUserId) {
+        if (!accessGuard.canAccess(courseId, currentUserId)) {
+            return forbidden(courseId);
+        }
         String content = documentService.getDocumentContent(courseId, name);
         if (content == null) {
             return ApiResponse.error(404, "资料不存在或内容为空");
@@ -115,7 +144,11 @@ public class KnowledgeBaseController {
      */
     @Operation(summary = "统计课程下的向量分块数量")
     @GetMapping("/{courseId}/count")
-    public ApiResponse<Map<String, Long>> countChunks(@PathVariable Integer courseId) {
+    public ApiResponse<Map<String, Long>> countChunks(@PathVariable Integer courseId,
+                                                      @RequestAttribute(required = false) Integer currentUserId) {
+        if (!accessGuard.canAccess(courseId, currentUserId)) {
+            return forbidden(courseId);
+        }
         Map<String, Long> result = new HashMap<>();
         result.put("count", documentService.countChunks(courseId));
         return ApiResponse.success(result);
@@ -130,7 +163,11 @@ public class KnowledgeBaseController {
      */
     @Operation(summary = "删除课程下的所有向量分块")
     @DeleteMapping("/{courseId}")
-    public ApiResponse<Map<String, Object>> deleteChunks(@PathVariable Integer courseId) {
+    public ApiResponse<Map<String, Object>> deleteChunks(@PathVariable Integer courseId,
+                                                         @RequestAttribute(required = false) Integer currentUserId) {
+        if (!accessGuard.canAccess(courseId, currentUserId)) {
+            return forbidden(courseId);
+        }
         int deleted = documentService.deleteChunksByCourseId(courseId);
         Map<String, Object> result = new HashMap<>();
         result.put("deleted", deleted);

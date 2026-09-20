@@ -2,8 +2,11 @@ package com.aiservice.aireviewassistant.service.impl;
 
 import com.aiservice.aireviewassistant.config.PromptTemplate;
 import com.aiservice.aireviewassistant.config.RagProperties;
+import com.aiservice.aireviewassistant.entity.Courses;
 import com.aiservice.aireviewassistant.metrics.AgentMetrics;
+import com.aiservice.aireviewassistant.service.CoursesService;
 import com.aiservice.aireviewassistant.service.RagSearchLogService;
+import com.aiservice.aireviewassistant.service.RagService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -26,6 +29,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -67,7 +71,14 @@ class RagServiceImplTest {
     @Mock
     private JdbcTemplate jdbcTemplate;
 
+    /** 课程服务 mock：用于把「用户」换算为「可见课程」，是知识库隔离的前提。 */
+    @Mock
+    private CoursesService coursesService;
+
     private RagServiceImpl ragService;
+
+    /** 测试用检索范围：用户 1 + 课程 100（归属校验会通过）。 */
+    private RagService.RagScope scope;
 
     /**
      * 每个测试方法执行前初始化被测服务。
@@ -77,7 +88,13 @@ class RagServiceImplTest {
     void setUp() {
         // 构造 RagServiceImpl 实例，注入所有 mock 依赖
         ragService = new RagServiceImpl(chatClient, vectorStore, promptTemplate, ragSearchLogService,
-                ragProperties, agentMetrics, new ObjectMapper(), jdbcTemplate);
+                ragProperties, agentMetrics, new ObjectMapper(), jdbcTemplate, coursesService);
+        scope = RagService.RagScope.of(1, 100);
+        // 默认：课程 100 属于用户 1，检索范围解析通过
+        Courses course = new Courses();
+        course.setId(100);
+        course.setUserId(1);
+        lenient().when(coursesService.getById(100)).thenReturn(course);
     }
 
     /**
@@ -99,7 +116,7 @@ class RagServiceImplTest {
         when(requestSpec.call()).thenReturn(callResponseSpec);
         when(callResponseSpec.content()).thenReturn("直接回答");
 
-        String result = ragService.answerQuestion("问题", 1);
+        String result = ragService.answerQuestion("问题", 1, scope);
 
         // 验证返回 LLM 的直接回答
         assertThat(result).isEqualTo("直接回答");
@@ -130,7 +147,7 @@ class RagServiceImplTest {
         when(requestSpec.call()).thenReturn(callResponseSpec);
         when(callResponseSpec.content()).thenReturn("基于知识库回答");
 
-        String result = ragService.answerQuestion("问题", 1);
+        String result = ragService.answerQuestion("问题", 1, scope);
 
         // 验证返回基于知识库的回答
         assertThat(result).isEqualTo("基于知识库回答");
@@ -157,7 +174,7 @@ class RagServiceImplTest {
         when(requestSpec.stream()).thenReturn(streamResponseSpec);
         when(streamResponseSpec.content()).thenReturn(Flux.just("流式", "回答"));
 
-        Flux<String> result = ragService.answerQuestionStream("问题", 1);
+        Flux<String> result = ragService.answerQuestionStream("问题", 1, scope);
 
         // 验证流式输出顺序与内容
         StepVerifier.create(result)
@@ -193,7 +210,7 @@ class RagServiceImplTest {
         when(requestSpec.call()).thenReturn(callResponseSpec);
         when(callResponseSpec.content()).thenReturn("回答");
 
-        ragService.answerQuestion("什么是事务", 1);
+        ragService.answerQuestion("什么是事务", 1, scope);
 
         // 验证使用渲染后的系统提示调用 LLM
         verify(requestSpec).system("系统提示");
@@ -223,7 +240,7 @@ class RagServiceImplTest {
         when(requestSpec.call()).thenReturn(callResponseSpec);
         when(callResponseSpec.content()).thenReturn("基于知识库回答");
 
-        ragService.answerQuestion("问题", 1);
+        ragService.answerQuestion("问题", 1, scope);
 
         // 验证记录了 RAG 搜索耗时
         verify(agentMetrics).recordRagSearch(anyLong());

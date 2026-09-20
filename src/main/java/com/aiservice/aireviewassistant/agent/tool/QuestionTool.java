@@ -62,7 +62,8 @@ public class QuestionTool implements AgentTool {
      */
     @Override
     public String execute(ToolContext context) {
-        return ragService.answerQuestion(context.getUserMessage(), context.getConversationId());
+        return ragService.answerQuestion(context.getUserMessage(), context.getConversationId(),
+            RagService.RagScope.of(context.getUserId(), context.getCourseId()));
     }
 
     /**
@@ -75,7 +76,8 @@ public class QuestionTool implements AgentTool {
     @Override
     public Flux<String> stream(ToolContext context) {
         RagService.RagAnswer answer = ragService.answerQuestionStreamWithMeta(
-            context.getUserMessage(), context.getConversationId());
+            context.getUserMessage(), context.getConversationId(),
+            RagService.RagScope.of(context.getUserId(), context.getCourseId()));
         return Flux.concat(
             Flux.just(answer.meta().toSseJson()),
             answer.content()

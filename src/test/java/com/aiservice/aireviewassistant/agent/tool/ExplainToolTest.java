@@ -63,7 +63,7 @@ class ExplainToolTest {
         ToolContext context = new ToolContext("随便", 1, Map.of("concept", "第三范式"), null);
 
         // mock RAG 检索与 prompt 渲染
-        when(ragService.retrieveContext("第三范式", 1)).thenReturn("范式相关内容");
+        when(ragService.retrieveContext("第三范式", 1, RagService.RagScope.NONE)).thenReturn("范式相关内容");
         when(promptTemplate.render(anyString(), any(Map.class))).thenReturn("系统提示");
 
         // mock ChatClient 调用链
@@ -77,7 +77,7 @@ class ExplainToolTest {
 
         // 验证返回结果与 RAG 检索调用
         assertThat(result).isEqualTo("第三范式解释");
-        verify(ragService).retrieveContext("第三范式", 1);
+        verify(ragService).retrieveContext("第三范式", 1, RagService.RagScope.NONE);
     }
 
     /**
@@ -91,7 +91,7 @@ class ExplainToolTest {
         ToolContext context = new ToolContext("解释一下数据库索引", 2, null, null);
 
         // mock RAG 检索、prompt 渲染与 ChatClient 调用链
-        when(ragService.retrieveContext(anyString(), any())).thenReturn("索引相关内容");
+        when(ragService.retrieveContext(anyString(), any(), any())).thenReturn("索引相关内容");
         when(promptTemplate.render(anyString(), any(Map.class))).thenReturn("系统提示");
         when(chatClient.prompt()).thenReturn(requestSpec);
         when(requestSpec.system(anyString())).thenReturn(requestSpec);
@@ -116,7 +116,7 @@ class ExplainToolTest {
 
         // mock RAG 检索（带元数据）、prompt 渲染与 ChatClient stream 调用链
         RagService.RagMeta meta = new RagService.RagMeta(1, 1, 3, 0.5, 9L, false, 0.75);
-        when(ragService.retrieveContextWithMeta(anyString(), any()))
+        when(ragService.retrieveContextWithMeta(anyString(), any(), any()))
             .thenReturn(new RagService.RagContext(meta, "上下文"));
         when(promptTemplate.render(anyString(), any(Map.class))).thenReturn("提示");
         when(chatClient.prompt()).thenReturn(requestSpec);

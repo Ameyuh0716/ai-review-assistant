@@ -2,8 +2,10 @@ package com.aiservice.aireviewassistant.service.impl;
 
 import com.aiservice.aireviewassistant.config.PromptTemplate;
 import com.aiservice.aireviewassistant.config.RagProperties;
+import com.aiservice.aireviewassistant.entity.Courses;
 import com.aiservice.aireviewassistant.entity.RagSearchLog;
 import com.aiservice.aireviewassistant.metrics.AgentMetrics;
+import com.aiservice.aireviewassistant.service.CoursesService;
 import com.aiservice.aireviewassistant.service.RagSearchLogService;
 import com.aiservice.aireviewassistant.service.RagService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -24,6 +26,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * RAG（检索增强生成）服务实现类。
@@ -54,6 +57,9 @@ public class RagServiceImpl implements RagService {
     private final AgentMetrics agentMetrics;
     private final ObjectMapper objectMapper;
 
+    /** 课程服务，用于解析检索范围（用户 → 其名下课程）。 */
+    private final CoursesService coursesService;
+
     /** JDBC 模板，用于向量检索零命中时按关键词直接检索知识库内容。 */
     private final JdbcTemplate jdbcTemplate;
 
@@ -68,11 +74,13 @@ public class RagServiceImpl implements RagService {
      * @param agentMetrics        Agent 调用指标收集器
      * @param objectMapper        JSON 序列化工具，用于记录检索片段
      * @param jdbcTemplate        JDBC 模板，用于关键词兜底检索
+     * @param coursesService      课程服务，用于解析检索范围
      */
     public RagServiceImpl(ChatClient chatClient, VectorStore vectorStore,
                           PromptTemplate promptTemplate, RagSearchLogService ragSearchLogService,
                           RagProperties ragProperties, AgentMetrics agentMetrics,
-                          ObjectMapper objectMapper, JdbcTemplate jdbcTemplate) {
+                          ObjectMapper objectMapper, JdbcTemplate jdbcTemplate,
+                          CoursesService coursesService) {
         this.chatClient = chatClient;
         this.vectorStore = vectorStore;
         this.promptTemplate = promptTemplate;
@@ -81,6 +89,7 @@ public class RagServiceImpl implements RagService {
         this.agentMetrics = agentMetrics;
         this.objectMapper = objectMapper;
         this.jdbcTemplate = jdbcTemplate;
+        this.coursesService = coursesService;
     }
 
     /**
@@ -92,13 +101,13 @@ public class RagServiceImpl implements RagService {
      *
      * @param question       用户问题
      * @param conversationId 当前会话 ID
+     * @param scope          检索范围（限定只能命中该用户自己的课程资料）
      * @return 大模型生成的回答文本
      */
     @Override
-    @Cacheable(value = "agentResults", key = "'rag:' + #question + ':' + (#conversationId != null ? #conversationId : 0)")
-    public String answerQuestion(String question, Integer conversationId) {
+    public String answerQuestion(String question, Integer conversationId, RagScope scope) {
         long startTime = System.currentTimeMillis();
-        SearchResult searchResult = searchDocuments(question);
+        SearchResult searchResult = searchDocuments(question, scope);
         logSearch(question, conversationId, searchResult, null,
             System.currentTimeMillis() - startTime, true, null);
 
@@ -124,11 +133,12 @@ public class RagServiceImpl implements RagService {
      *
      * @param question       用户问题
      * @param conversationId 当前会话 ID
+     * @param scope          检索范围（限定只能命中该用户自己的课程资料）
      * @return 按 Token 流式推送的回答字符串流
      */
     @Override
-    public Flux<String> answerQuestionStream(String question, Integer conversationId) {
-        return answerQuestionStreamWithMeta(question, conversationId).content();
+    public Flux<String> answerQuestionStream(String question, Integer conversationId, RagScope scope) {
+        return answerQuestionStreamWithMeta(question, conversationId, scope).content();
     }
 
     /**
@@ -138,12 +148,13 @@ public class RagServiceImpl implements RagService {
      *
      * @param question       用户问题
      * @param conversationId 当前会话 ID
+     * @param scope          检索范围（限定只能命中该用户自己的课程资料）
      * @return 检索元数据 + 答案流
      */
     @Override
-    public RagAnswer answerQuestionStreamWithMeta(String question, Integer conversationId) {
+    public RagAnswer answerQuestionStreamWithMeta(String question, Integer conversationId, RagScope scope) {
         long startTime = System.currentTimeMillis();
-        SearchResult searchResult = searchDocuments(question);
+        SearchResult searchResult = searchDocuments(question, scope);
         logSearch(question, conversationId, searchResult, null,
             System.currentTimeMillis() - startTime, true, null);
 
@@ -171,11 +182,12 @@ public class RagServiceImpl implements RagService {
      *
      * @param query          查询文本
      * @param conversationId 当前会话 ID
+     * @param scope          检索范围（限定只能命中该用户自己的课程资料）
      * @return 拼接后的知识库上下文；无命中时返回空字符串
      */
     @Override
-    public String retrieveContext(String query, Integer conversationId) {
-        return retrieveContextWithMeta(query, conversationId).context();
+    public String retrieveContext(String query, Integer conversationId, RagScope scope) {
+        return retrieveContextWithMeta(query, conversationId, scope).context();
     }
 
     /**
@@ -184,15 +196,69 @@ public class RagServiceImpl implements RagService {
      *
      * @param query          查询文本
      * @param conversationId 当前会话 ID
+     * @param scope          检索范围（限定只能命中该用户自己的课程资料）
      * @return 检索元数据 + 拼接上下文
      */
     @Override
-    public RagContext retrieveContextWithMeta(String query, Integer conversationId) {
+    public RagContext retrieveContextWithMeta(String query, Integer conversationId, RagScope scope) {
         long startTime = System.currentTimeMillis();
-        SearchResult searchResult = searchDocuments(query);
+        SearchResult searchResult = searchDocuments(query, scope);
         logSearch(query, conversationId, searchResult, null,
             System.currentTimeMillis() - startTime, true, null);
         return new RagContext(searchResult.meta(), searchResult.context());
+    }
+
+    /**
+     * 解析检索范围：把「当前用户 + 当前选中课程」换算为允许检索的课程 ID 列表。
+     * <p>
+     * 规则：
+     * <ol>
+     *   <li>指定了课程 → 仅该课程；同时校验课程归属，防止前端伪造 courseId 越权读取他人资料；</li>
+     *   <li>未指定课程但已登录 → 该用户名下全部课程；</li>
+     *   <li>匿名 → 空列表（无任何可见资源）。
+     * </ol>
+     * </p>
+     *
+     * @param scope 检索范围描述
+     * @return 允许检索的课程 ID 列表；空列表表示不应检索
+     */
+    private List<Integer> resolveCourseIds(RagScope scope) {
+        if (scope == null) {
+            return List.of();
+        }
+        if (scope.courseId() != null) {
+            // 指定了课程：校验归属（匿名用户不允许按课程检索）
+            if (scope.userId() == null) {
+                log.debug("[RAG] 匿名用户指定了 courseId={}，不予检索", scope.courseId());
+                return List.of();
+            }
+            try {
+                Courses course = coursesService.getById(scope.courseId());
+                if (course == null || !scope.userId().equals(course.getUserId())) {
+                    log.warn("[RAG] 课程 {} 不属于用户 {}，不予检索", scope.courseId(), scope.userId());
+                    return List.of();
+                }
+                return List.of(scope.courseId());
+            } catch (Exception e) {
+                log.warn("[RAG] 校验课程归属失败: {}", e.getMessage());
+                return List.of();
+            }
+        }
+        if (scope.userId() == null) {
+            return List.of();
+        }
+        // 未指定课程：允许检索该用户的全部课程
+        try {
+            return coursesService.lambdaQuery()
+                .eq(Courses::getUserId, scope.userId())
+                .list()
+                .stream()
+                .map(Courses::getId)
+                .toList();
+        } catch (Exception e) {
+            log.warn("[RAG] 查询用户课程失败: {}", e.getMessage());
+            return List.of();
+        }
     }
 
     /**
@@ -207,9 +273,10 @@ public class RagServiceImpl implements RagService {
      * </p>
      *
      * @param question 用户问题或查询文本
+     * @param scope    检索范围（限定可见课程）
      * @return 检索结果封装，包括命中数量、JSON 片段、拼接上下文
      */
-    private SearchResult searchDocuments(String question) {
+    private SearchResult searchDocuments(String question, RagScope scope) {
         long searchStart = System.currentTimeMillis();
         List<Document> docs = null;
         int topK = ragProperties.getTopK();
@@ -217,6 +284,18 @@ public class RagServiceImpl implements RagService {
         // 记录向量检索初始召回数（重排序前），用于前端展示检索漏斗
         int candidateCount = 0;
         boolean keywordFallback = false;
+
+        // 解析可见课程范围：为空则直接返回空结果，连向量库都不查
+        List<Integer> scopedCourseIds = resolveCourseIds(scope);
+        if (scopedCourseIds.isEmpty()) {
+            log.debug("[RAG] 检索范围为空（anonymous 或用户无课程），跳过知识库检索");
+            RagMeta meta = new RagMeta(0, 0, topK, threshold,
+                System.currentTimeMillis() - searchStart, false, null);
+            return new SearchResult(0, "[]", "", meta);
+        }
+        // 检索过滤条件：限定只能命中这些课程的分块（PgVectorStore 会转成 JSONPath 过滤）
+        String filterExpression = buildCourseFilter(scopedCourseIds);
+
         try {
             // 若启用重排序，先召回 candidateMultiplier 倍文档作为候选集
             int candidateMultiplier = ragProperties.getRerankCandidateMultiplier();
@@ -228,6 +307,7 @@ public class RagServiceImpl implements RagService {
                     .query(question)
                     .topK(searchTopK)
                     .similarityThreshold(threshold)
+                    .filterExpression(filterExpression)
                     .build()
             );
             candidateCount = docs.size();
@@ -253,7 +333,7 @@ public class RagServiceImpl implements RagService {
             // 可能低于阈值，但知识库中确实存在该学科资料。此处按关键词直接匹配内容，
             // 避免下游工具拿到空上下文后误报"知识库中暂无相关内容"。
             if (docs.isEmpty()) {
-                docs = keywordFallbackSearch(question, topK);
+                docs = keywordFallbackSearch(question, topK, scopedCourseIds);
                 keywordFallback = !docs.isEmpty();
                 if (keywordFallback) {
                     log.debug("向量检索零命中，关键词兜底召回 {} 篇", docs.size());
@@ -415,17 +495,18 @@ public class RagServiceImpl implements RagService {
      * 从而避免完整问句中某个词偶然出现在资料里就产生命中。
      * </p>
      *
-     * @param question 用户查询
-     * @param limit    最多返回的片段数
+     * @param question        用户查询
+     * @param limit           最多返回的片段数
+     * @param scopedCourseIds 允许检索的课程 ID 列表（非空）
      * @return 匹配到的文档列表；无匹配时返回空列表
      */
-    private List<Document> keywordFallbackSearch(String question, int limit) {
+    private List<Document> keywordFallbackSearch(String question, int limit, List<Integer> scopedCourseIds) {
         // 候选数量放宽：同一资料常被导入多个课程，去重会消耗名额，先多取一些再截断
         int fetch = Math.max(limit, limit * ragProperties.getRerankCandidateMultiplier());
         String cleaned = cleanQuery(question);
         // 第一步：整句匹配
         if (!cleaned.isEmpty()) {
-            List<Document> whole = dedupeAndLimit(matchContent(cleaned, fetch), limit);
+            List<Document> whole = dedupeAndLimit(matchContent(cleaned, fetch, scopedCourseIds), limit);
             if (!whole.isEmpty()) {
                 return whole;
             }
@@ -435,7 +516,7 @@ public class RagServiceImpl implements RagService {
             if (cleaned.length() > 0 && keyword.length() * 100 < cleaned.length() * DOMINANT_KEYWORD_PERCENT) {
                 continue;
             }
-            List<Document> matched = dedupeAndLimit(matchContent(keyword, fetch), limit);
+            List<Document> matched = dedupeAndLimit(matchContent(keyword, fetch, scopedCourseIds), limit);
             if (!matched.isEmpty()) {
                 return matched;
             }
@@ -457,17 +538,29 @@ public class RagServiceImpl implements RagService {
     }
 
     /**
-     * 按关键词做内容模糊匹配。
+     * 按关键词做内容模糊匹配（限定在可见课程范围内）。
+     * <p>
+     * 必须带上课程过滤：这是裸 SQL 查询，若不过滤会直接绕过 RAG 的多用户隔离，
+     * 让用户“兜底命中”别人的资料。
+     * </p>
      *
-     * @param keyword 匹配词
-     * @param limit   最多返回的片段数
+     * @param keyword         匹配词
+     * @param limit           最多返回的片段数
+     * @param scopedCourseIds 允许检索的课程 ID 列表（非空）
      * @return 命中的文档列表
      */
-    private List<Document> matchContent(String keyword, int limit) {
-        String sql = "SELECT id, content FROM vector_store WHERE content ILIKE ? LIMIT ?";
+    private List<Document> matchContent(String keyword, int limit, List<Integer> scopedCourseIds) {
+        String placeholders = scopedCourseIds.stream().map(id -> "?").collect(Collectors.joining(","));
+        String sql = "SELECT id, content FROM vector_store "
+            + "WHERE content ILIKE ? AND (metadata::jsonb ->> 'courseId')::int IN (" + placeholders + ") "
+            + "LIMIT ?";
+        List<Object> args = new ArrayList<>();
+        args.add("%" + keyword + "%");
+        args.addAll(scopedCourseIds);
+        args.add(limit);
         return jdbcTemplate.query(sql,
             (rs, rowNum) -> new Document(rs.getString("id"), rs.getString("content"), Map.of()),
-            "%" + keyword + "%", limit);
+            args.toArray());
     }
 
     /**
@@ -484,6 +577,24 @@ public class RagServiceImpl implements RagService {
         return question
             .replaceAll("[^\\u4e00-\\u9fa5a-zA-Z0-9]", "")
             .replaceAll("什么是|请问|怎么|如何|为什么|解释一下|介绍一下|的|了|吗|呢", "");
+    }
+
+    /**
+     * 构造「限定可见课程」的向量检索过滤表达式。
+     * <p>
+     * PgVectorStore 会把它转换为 JSONPath 并附加到 SQL 上（{@code metadata::jsonb @@ '...'}）；
+     * metadata 中的 courseId 存的是 JSON 数字，因此这里必须用数字字面量，
+     * 写成字符串会导致匹配失败。
+     * </p>
+     *
+     * @param courseIds 允许检索的课程 ID 列表（非空）
+     * @return 形如 {@code courseId in [1, 2, 3]} 的过滤表达式；仅一个课程时用等值形式
+     */
+    private String buildCourseFilter(List<Integer> courseIds) {
+        if (courseIds.size() == 1) {
+            return "courseId == " + courseIds.get(0);
+        }
+        return "courseId in [" + courseIds.stream().map(String::valueOf).collect(Collectors.joining(",")) + "]";
     }
 
     /**

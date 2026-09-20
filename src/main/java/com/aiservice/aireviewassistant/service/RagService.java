@@ -17,18 +17,20 @@ public interface RagService {
      *
      * @param question       用户问题
      * @param conversationId 当前会话 ID，用于检索日志关联；允许为空
+     * @param scope          检索范围，用于限定只能命中当前用户自己的课程资料；不可为 null
      * @return 大模型生成的回答内容；未命中知识库时直接由大模型回答
      */
-    String answerQuestion(String question, Integer conversationId);
+    String answerQuestion(String question, Integer conversationId, RagScope scope);
 
     /**
      * 基于 RAG 的流式问答：通过 SSE 逐字推送回答内容。
      *
      * @param question       用户问题
      * @param conversationId 当前会话 ID，用于检索日志关联；允许为空
+     * @param scope          检索范围，用于限定只能命中当前用户自己的课程资料；不可为 null
      * @return 按 Token 流式返回的字符串流
      */
-    Flux<String> answerQuestionStream(String question, Integer conversationId);
+    Flux<String> answerQuestionStream(String question, Integer conversationId, RagScope scope);
 
     /**
      * 检索与问题相关的知识库上下文，返回拼接后的文本块。
@@ -39,9 +41,10 @@ public interface RagService {
      *
      * @param query          查询文本
      * @param conversationId 当前会话 ID，用于检索日志关联；允许为空
+     * @param scope          检索范围，用于限定只能命中当前用户自己的课程资料；不可为 null
      * @return 拼接后的知识库上下文；无命中时返回空字符串
      */
-    String retrieveContext(String query, Integer conversationId);
+    String retrieveContext(String query, Integer conversationId, RagScope scope);
 
     /**
      * 基于 RAG 的流式问答（带检索元数据）。
@@ -52,18 +55,66 @@ public interface RagService {
      *
      * @param question       用户问题
      * @param conversationId 当前会话 ID
+     * @param scope          检索范围，用于限定只能命中当前用户自己的课程资料；不可为 null
      * @return 检索元数据 + 答案流
      */
-    RagAnswer answerQuestionStreamWithMeta(String question, Integer conversationId);
+    RagAnswer answerQuestionStreamWithMeta(String question, Integer conversationId, RagScope scope);
 
     /**
      * 检索知识库上下文（带检索元数据）。
      *
      * @param query          查询文本
      * @param conversationId 当前会话 ID
+     * @param scope          检索范围，用于限定只能命中当前用户自己的课程资料；不可为 null
      * @return 检索元数据 + 拼接上下文
      */
-    RagContext retrieveContextWithMeta(String query, Integer conversationId);
+    RagContext retrieveContextWithMeta(String query, Integer conversationId, RagScope scope);
+
+    /**
+     * 知识库检索范围。
+     * <p>
+     * <b>为什么要这个东西：</b>向量库（vector_store）是一张全局表，
+     * 所有用户的课程资料分块都存在里面，只靠 metadata.courseId 区分。
+     * 若检索时不限定范围，任何用户提问都会在整个库里搜——
+     * 于是「没上传过任何资料的人」也能“命中”别人（或早期测试课程）的知识库，
+     * 既让人困惑又是数据泄露。
+     * </p>
+     * <p>解析规则（由 {@code RagServiceImpl} 内部完成）：</p>
+     * <ul>
+     *   <li>指定了 {@code courseId} → 只检索该课程（同时校验它确实属于该用户，防越权）；</li>
+     *   <li>未指定 {@code courseId} 且已登录 → 检索该用户名下的全部课程；</li>
+     *   <li>匿名用户 → 无可见课程，不检索。</li>
+     * </ul>
+     *
+     * @param userId   当前登录用户 ID，为 null 表示匿名
+     * @param courseId 当前选中的课程 ID，为 null 表示未指定课程
+     */
+    record RagScope(Integer userId, Integer courseId) {
+
+        /** 匿名/无上下文：没有任何可见课程，检索结果必定为空。 */
+        public static final RagScope NONE = new RagScope(null, null);
+
+        /**
+         * 构造一个「仅限该用户」的检索范围。
+         *
+         * @param userId 用户 ID
+         * @return 检索范围
+         */
+        public static RagScope ofUser(Integer userId) {
+            return new RagScope(userId, null);
+        }
+
+        /**
+         * 构造一个「仅限该用户 + 该课程」的检索范围。
+         *
+         * @param userId   用户 ID
+         * @param courseId 课程 ID
+         * @return 检索范围
+         */
+        public static RagScope of(Integer userId, Integer courseId) {
+            return new RagScope(userId, courseId);
+        }
+    }
 
     /**
      * 检索元数据。

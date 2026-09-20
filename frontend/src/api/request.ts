@@ -1,5 +1,6 @@
 import axios, { AxiosError, AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 import { useAuthStore } from '@/stores/auth'
+import { requestTokenRefresh } from '@/api/token'
 
 declare module 'axios' {
   export interface AxiosRequestConfig {
@@ -15,7 +16,12 @@ export interface ApiResponse<T = unknown> {
 }
 
 let isRefreshing = false
-let refreshSubscribers: Array<(token: string) => void> = []
+/**
+ * 令牌刷新期间被挡住的请求回调。
+ * 参数为 null 表示刷新<b>失败</b>——必须把失败也广播出去，
+ * 否则排队中的 Promise 会永远处于 pending（既不会重放也不会报错）。
+ */
+let refreshSubscribers: Array<(token: string | null) => void> = []
 
 const request = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || '',
@@ -30,35 +36,30 @@ const request = axios.create({
 /** AI 生成类接口专用超时（LLM 生成通常需要 30-90 秒） */
 export const AI_TIMEOUT = 120000
 
-function subscribeTokenRefresh(cb: (token: string) => void) {
+function subscribeTokenRefresh(cb: (token: string | null) => void) {
   refreshSubscribers.push(cb)
 }
 
-function onTokenRefreshed(token: string) {
+function onTokenRefreshed(token: string | null) {
   refreshSubscribers.forEach(cb => cb(token))
   refreshSubscribers = []
 }
 
+/**
+ * 刷新 Access Token 并写回 store。
+ *
+ * 令牌交换本身交给 {@link requestTokenRefresh}（裸 axios 实现），这里只负责状态写入。
+ * 拆分的原因：若把刷新逻辑写在这里，{@code stores/auth.ts} 为了在路由守卫中预判续期
+ * 就必须反过来导入本模块，形成“store ⇄ request”的循环依赖。
+ *
+ * @returns 刷新成功返回新 Access Token；失败返回 null
+ */
 async function doRefresh(): Promise<string | null> {
   const authStore = useAuthStore()
-  if (!authStore.refreshToken) return null
-
-  try {
-    const res = await axios.post<ApiResponse<{
-      token: string
-      refreshToken: string
-      expiresIn: number
-    }>>(
-      `${request.defaults.baseURL || ''}/api/auth/refresh?refreshToken=${encodeURIComponent(authStore.refreshToken)}`
-    )
-    if (res.data.code === 0 && res.data.data) {
-      authStore.setTokens(res.data.data.token, res.data.data.refreshToken, res.data.data.expiresIn)
-      return res.data.data.token
-    }
-  } catch (e) {
-    console.error('Refresh token failed', e)
-  }
-  return null
+  const pair = await requestTokenRefresh(authStore.refreshToken || '')
+  if (!pair) return null
+  authStore.setTokens(pair.token, pair.refreshToken, pair.expiresIn)
+  return pair.token
 }
 
 request.interceptors.request.use(
@@ -95,8 +96,14 @@ request.interceptors.response.use(
 
     if (status === 401 && !originalRequest._retry) {
       if (isRefreshing) {
-        return new Promise((resolve) => {
+        // 已有刷新在途：排队等待结果，避免 N 个 401 触发 N 次刷新（刷新风暴 + 轮换竞态）
+        return new Promise((resolve, reject) => {
           subscribeTokenRefresh((token) => {
+            // 刷新失败的情况：直接让该请求失败，不能让它永远挂起
+            if (!token) {
+              reject(error)
+              return
+            }
             if (originalRequest.headers) {
               originalRequest.headers.Authorization = `Bearer ${token}`
             }
@@ -118,9 +125,10 @@ request.interceptors.response.use(
         }
         return request(originalRequest)
       } else {
+        // 刷新失败：先把失败广播给所有排队请求（否则它们会永久 pending），再登出
+        onTokenRefreshed(null)
         const authStore = useAuthStore()
         authStore.logout()
-        window.location.href = '/login'
         return Promise.reject(error)
       }
     }

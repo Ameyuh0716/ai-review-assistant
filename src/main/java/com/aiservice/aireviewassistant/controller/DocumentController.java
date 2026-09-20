@@ -1,6 +1,7 @@
 package com.aiservice.aireviewassistant.controller;
 
 import com.aiservice.aireviewassistant.common.ApiResponse;
+import com.aiservice.aireviewassistant.security.CourseAccessGuard;
 import com.aiservice.aireviewassistant.service.DocumentService;
 import io.swagger.v3.oas.annotations.Operation;
 import jakarta.validation.constraints.NotBlank;
@@ -24,13 +25,18 @@ public class DocumentController {
 
     private final DocumentService documentService;
 
+    /** 课程归属校验：防止向他人课程上传/导入资料。 */
+    private final CourseAccessGuard accessGuard;
+
     /**
-     * 构造方法，注入文档服务。
+     * 构造方法，注入文档服务与课程访问守卫。
      *
      * @param documentService 文档处理服务，负责解析与向量化
+     * @param accessGuard     课程归属校验组件
      */
-    public DocumentController(DocumentService documentService) {
+    public DocumentController(DocumentService documentService, CourseAccessGuard accessGuard) {
         this.documentService = documentService;
+        this.accessGuard = accessGuard;
     }
 
     /**
@@ -45,7 +51,12 @@ public class DocumentController {
     @PostMapping("/upload")
     public ApiResponse<Map<String, Object>> uploadDocument(
             @RequestParam("courseId") @NotNull(message = "课程ID不能为空") Integer courseId,
-            @RequestParam("file") MultipartFile file) {
+            @RequestParam("file") MultipartFile file,
+            @RequestAttribute(required = false) Integer currentUserId) {
+        // 先校验课程归属：否则任何用户都能往别人课程里塞资料
+        if (!accessGuard.canAccess(courseId, currentUserId)) {
+            return ApiResponse.error(403, "无权操作该课程的知识库（courseId=" + courseId + "）");
+        }
         // 前置校验：文件为空时直接返回错误提示，避免进入后续处理
         if (file == null || file.isEmpty()) {
             return ApiResponse.error(400, "请选择要上传的文件");
@@ -74,7 +85,12 @@ public class DocumentController {
     @PostMapping(value = "/import", consumes = org.springframework.http.MediaType.TEXT_PLAIN_VALUE)
     public ApiResponse<Map<String, Object>> importContent(
             @RequestParam("courseId") @NotNull(message = "课程ID不能为空") Integer courseId,
-            @RequestBody @NotBlank(message = "内容不能为空") String content) {
+            @RequestBody @NotBlank(message = "内容不能为空") String content,
+            @RequestAttribute(required = false) Integer currentUserId) {
+        // 先校验课程归属：否则任何用户都能往别人课程里塞资料
+        if (!accessGuard.canAccess(courseId, currentUserId)) {
+            return ApiResponse.error(403, "无权操作该课程的知识库（courseId=" + courseId + "）");
+        }
         String message = documentService.importContent(courseId, content.trim());
         // 服务层以 "错误：" 前缀表示业务失败，转换为错误响应码
         if (message != null && message.startsWith("错误：")) {

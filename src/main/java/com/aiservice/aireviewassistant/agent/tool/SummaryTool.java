@@ -79,7 +79,8 @@ public class SummaryTool implements AgentTool {
     @Override
     public String execute(ToolContext context) {
         String topic = extractTopic(context);
-        String retrievedContext = ragService.retrieveContext(topic, context.getConversationId());
+        String retrievedContext = ragService.retrieveContext(topic, context.getConversationId(),
+            RagService.RagScope.of(context.getUserId(), context.getCourseId()));
         String systemPrompt = promptTemplate.render("summary-system.txt",
             Map.of("topic", topic, "context", retrievedContext));
         return chatClient.prompt()
@@ -99,7 +100,9 @@ public class SummaryTool implements AgentTool {
     @Override
     public Flux<String> stream(ToolContext context) {
         String topic = extractTopic(context);
-        RagService.RagContext ragContext = ragService.retrieveContextWithMeta(topic, context.getConversationId());
+        RagService.RagContext ragContext = ragService.retrieveContextWithMeta(topic,
+            context.getConversationId(),
+            RagService.RagScope.of(context.getUserId(), context.getCourseId()));
         String systemPrompt = promptTemplate.render("summary-system.txt",
             Map.of("topic", topic, "context", ragContext.context()));
         return Flux.concat(
